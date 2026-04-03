@@ -253,6 +253,27 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_Smoke_AskCommand_EndToEnd_ReturnsSuccess_AndWritesExecutionLifecycle()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            "ask",
+            "--model",
+            "qwen3.5:4b",
+            "gerar",
+            "smoke",
+            "test");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Executando comando unico 'ask'.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("Modelo: qwen3.5:4b | Prompt: gerar smoke test", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
     public void Main_ChatCommand_WithInputs_ReturnsSuccess_AndProcessesPrompts()
     {
         var result = ExecuteMainWithInput(
@@ -283,6 +304,26 @@ public sealed class ProgramMainTests
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
         Assert.Contains("[INFO] Modo interativo iniciado. Digite 'exit' para sair.", result.StdOut);
         Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: gerar classe service", result.StdOut);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_Smoke_ChatCommand_EndToEnd_ReturnsSuccess_AndProcessesConversationUntilExit()
+    {
+        var result = ExecuteMainWithInputAndModelAwareStreamingExecutor(
+            "planejar smoke test\najustar asserts\nexit\n",
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            "chat",
+            "--model=qwen3.5:4b");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Modo interativo iniciado. Digite 'exit' para sair.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("Modelo: qwen3.5:4b | Prompt: planejar smoke test", result.StdOut);
+        Assert.Contains("Modelo: qwen3.5:4b | Prompt: ajustar asserts", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
         Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
