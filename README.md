@@ -23,6 +23,9 @@ Funcionalidades ja disponiveis:
 - `config get/set`: le e atualiza configuracao do usuario;
 - `skills`, `skills show`, `skill`: skills padrao para tarefas tecnicas.
 
+Versao atual: `0.1.0`.
+Historico de mudancas: `CHANGELOG.md`.
+
 ## Pre-requisitos
 
 1. .NET SDK 10.0 (para compilar e executar o projeto `net10.0`).
@@ -44,20 +47,63 @@ git clone <url-do-repositorio>
 cd ASXRunTerminal
 ```
 
-### 2. Restaurar e buildar
+### 2. Build local com script
+
+Windows (PowerShell):
+
+```powershell
+.\scripts\build.ps1
+```
+
+Linux/macOS (Bash):
+
+```bash
+chmod +x ./scripts/*.sh
+./scripts/build.sh
+```
+
+Exemplos uteis:
+
+```powershell
+.\scripts\build.ps1 -Configuration Release -Publish
+.\scripts\build.ps1 -SkipTests
+```
+
+```bash
+./scripts/build.sh --configuration Release --publish
+./scripts/build.sh --skip-tests
+```
+
+### 3. Rodar localmente com script
+
+Windows (PowerShell):
+
+```powershell
+.\scripts\run.ps1 doctor
+.\scripts\run.ps1 ask "Explique o padrao repository em C#."
+```
+
+Linux/macOS (Bash):
+
+```bash
+./scripts/run.sh -- doctor
+./scripts/run.sh -- ask "Explique o padrao repository em C#."
+```
+
+### 4. Comandos manuais equivalentes
 
 ```bash
 dotnet restore ASXRunTerminal.slnx
 dotnet build ASXRunTerminal.slnx -c Debug
 ```
 
-### 3. Rodar sem instalar (modo desenvolvimento)
+Rodar sem script (modo desenvolvimento):
 
 ```bash
 dotnet run --project ASXRunTerminal -- --help
 ```
 
-### 4. Publicar binario local
+Publicar binario local:
 
 ```bash
 dotnet publish ASXRunTerminal/ASXRunTerminal.csproj -c Release -o ./dist
@@ -76,6 +122,12 @@ No Linux/macOS, execute:
 ```
 
 ## Uso Rapido
+
+Se voce ainda nao publicou o binario local, substitua `asxrun` por:
+
+```bash
+dotnet run --project ASXRunTerminal --
+```
 
 ### Diagnostico do Ollama
 
@@ -129,7 +181,7 @@ asxrun ask "Resumo do arquivo Program.cs"
 
 Arquivos locais criados automaticamente:
 
-- Windows: `%USERPROFILE%/.asxrun/config` e `%USERPROFILE%/.asxrun/history`
+- Windows: `%USERPROFILE%\\.asxrun\\config` e `%USERPROFILE%\\.asxrun\\history`
 - Linux/macOS: `~/.asxrun/config` e `~/.asxrun/history`
 
 Chaves suportadas:

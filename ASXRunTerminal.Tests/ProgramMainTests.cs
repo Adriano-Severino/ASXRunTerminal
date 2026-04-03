@@ -69,7 +69,7 @@ public sealed class ProgramMainTests
         var output = result.StdOut.Trim();
 
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
-        Assert.Matches(new Regex("^asxrun\\s+\\S+$"), output);
+        Assert.Equal("asxrun 0.1.0", output);
         Assert.Equal(string.Empty, result.StdErr);
     }
 
