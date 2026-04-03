@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="ASXRunTerminal.Tests/ASXRunTerminal.Tests.csproj" />
+  <Project Path="ASXRunTerminal/ASXRunTerminal.csproj" />
+</Solution>
