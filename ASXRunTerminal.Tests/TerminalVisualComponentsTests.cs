@@ -45,7 +45,9 @@ public sealed class TerminalVisualComponentsTests
 
     [Theory]
     [InlineData(nameof(ExecutionState.Connecting), "[CONN]")]
+    [InlineData(nameof(ExecutionState.ToolCall), "[TOOL]")]
     [InlineData(nameof(ExecutionState.Processing), "[WORK]")]
+    [InlineData(nameof(ExecutionState.Diff), "[DIFF]")]
     [InlineData(nameof(ExecutionState.Completed), "[DONE]")]
     [InlineData(nameof(ExecutionState.Error), "[FAIL]")]
     public void TerminalStatusBadge_ImplicitOperator_MapsExpectedBadge(
@@ -69,6 +71,36 @@ public sealed class TerminalVisualComponentsTests
     {
         TerminalSpinnerFrame frame = TerminalVisualComponents.BuildSpinnerFrame(
             ExecutionState.Processing,
+            step);
+
+        Assert.Equal(expectedFrame, frame.Value);
+    }
+
+    [Theory]
+    [InlineData(0, ">")]
+    [InlineData(1, ">>")]
+    [InlineData(2, ">>>")]
+    [InlineData(3, ">")]
+    [InlineData(-1, ">")]
+    public void BuildSpinnerFrame_ForToolCall_CyclesByStep(int step, string expectedFrame)
+    {
+        TerminalSpinnerFrame frame = TerminalVisualComponents.BuildSpinnerFrame(
+            ExecutionState.ToolCall,
+            step);
+
+        Assert.Equal(expectedFrame, frame.Value);
+    }
+
+    [Theory]
+    [InlineData(0, "+")]
+    [InlineData(1, "+-")]
+    [InlineData(2, "-")]
+    [InlineData(3, "+")]
+    [InlineData(-1, "+")]
+    public void BuildSpinnerFrame_ForDiff_CyclesByStep(int step, string expectedFrame)
+    {
+        TerminalSpinnerFrame frame = TerminalVisualComponents.BuildSpinnerFrame(
+            ExecutionState.Diff,
             step);
 
         Assert.Equal(expectedFrame, frame.Value);

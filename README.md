@@ -159,6 +159,20 @@ asxrun ask --model qwen2.5-coder:7b "Gerar teste unitario para parser de argumen
 asxrun chat
 ```
 
+Comandos interativos no chat:
+
+- `/help`
+- `/clear`
+- `/models`
+- `/tools`
+- `/exit`
+
+Atalhos uteis no chat:
+
+- `Tab`: autocomplete de comandos, opcoes e nomes de modelos.
+- `Ctrl+R`: busca incremental no historico local de prompts.
+- `Esc`: cancela a busca incremental ativa.
+
 Para sair do modo interativo: `exit`, `quit` ou `sair`.
 
 ### Modelo padrao via variavel de ambiente

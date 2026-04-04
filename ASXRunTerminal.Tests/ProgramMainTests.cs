@@ -107,9 +107,13 @@ public sealed class ProgramMainTests
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
         Assert.Contains("[INFO] Executando comando unico 'ask'.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: tool call.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: diff.", result.StdOut);
         Assert.Contains("[CONN]", result.StdOut);
+        Assert.Contains("[TOOL]", result.StdOut);
         Assert.Contains("[WORK]", result.StdOut);
+        Assert.Contains("[DIFF]", result.StdOut);
         Assert.Contains($"Prompt: {prompt}", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
         Assert.Contains("[DONE]", result.StdOut);
@@ -148,9 +152,28 @@ public sealed class ProgramMainTests
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
         Assert.Contains("[INFO] Executando comando unico 'ask'.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: tool call.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: diff.", result.StdOut);
         Assert.Contains("Prompt: resposta em stream", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AskCommand_WithDiffStream_WritesDiffStateWithDetectionMessage()
+    {
+        var result = ExecuteMainWithStreamingExecutor(
+            static (_, _) => StreamPromptWithDiffInChunks(),
+            "ask",
+            "gerar",
+            "diff");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Estado de execucao: diff. Diff identificado na resposta.", result.StdOut);
+        Assert.Contains("```diff", result.StdOut);
+        Assert.Contains("+nova linha", result.StdOut);
+        Assert.Contains("-linha antiga", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
 
@@ -324,6 +347,95 @@ public sealed class ProgramMainTests
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
         Assert.Contains("[INFO] Modo interativo iniciado. Digite 'exit' para sair.", result.StdOut);
         Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: gerar classe service", result.StdOut);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ChatCommand_WithInteractiveHelpCommand_ReturnsSuccess_AndWritesInteractiveHelp()
+    {
+        var result = ExecuteMainWithInput(
+            "/help\n/exit\n",
+            "chat");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Comandos interativos do chat:", result.StdOut);
+        Assert.Contains("- /help", result.StdOut);
+        Assert.Contains("- /clear", result.StdOut);
+        Assert.Contains("- /models", result.StdOut);
+        Assert.Contains("- /tools", result.StdOut);
+        Assert.Contains("- /exit", result.StdOut);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ChatCommand_WithInteractiveClearCommand_ReturnsSuccess_AndContinuesProcessingPrompts()
+    {
+        var result = ExecuteMainWithInput(
+            "/clear\ngerar classe service\n/exit\n",
+            static value => $"Prompt: {value}",
+            "chat");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Comando /clear executado.", result.StdOut);
+        Assert.Contains("Prompt: gerar classe service", result.StdOut);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ChatCommand_WithInteractiveModelsCommand_ReturnsSuccess_AndListsModels()
+    {
+        var models = new[]
+        {
+            new OllamaLocalModel("qwen3.5:4b"),
+            new OllamaLocalModel("llama3.2:latest")
+        };
+
+        var result = ExecuteMainWithInputAndModels(
+            "/models\n/exit\n",
+            _ => Task.FromResult<IReadOnlyList<OllamaLocalModel>>(models),
+            "chat");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Listando modelos locais do Ollama.", result.StdOut);
+        Assert.Contains("- llama3.2:latest", result.StdOut);
+        Assert.Contains("- qwen3.5:4b", result.StdOut);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ChatCommand_WithInteractiveToolsCommand_ReturnsSuccess_AndWritesToolsSummary()
+    {
+        var result = ExecuteMainWithInput(
+            "/tools\n/exit\n",
+            "chat");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Ferramentas e recursos locais disponiveis:", result.StdOut);
+        Assert.Contains("Skills built-in", result.StdOut);
+        Assert.Contains("/help, /clear, /models, /tools, /exit", result.StdOut);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ChatCommand_WithInteractiveExitCommand_ReturnsSuccess_WithoutExecutingPrompt()
+    {
+        var promptExecutionCount = 0;
+        var result = ExecuteMainWithInput(
+            "/exit\n",
+            _ =>
+            {
+                promptExecutionCount++;
+                return "Prompt: nao deveria executar";
+            },
+            "chat");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(0, promptExecutionCount);
         Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
@@ -784,6 +896,7 @@ public sealed class ProgramMainTests
 
         Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: tool call.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
         Assert.Contains("[ERROR] Estado de execucao: erro. Nao foi possivel executar o prompt: falha simulada", result.StdErr);
         Assert.Contains("[FAIL]", result.StdErr);
@@ -804,6 +917,7 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Executando comando unico 'ask'.", result.StdOut);
         Assert.Contains("[INFO] Cancelamento solicitado via Ctrl+C. Interrompendo prompt em execucao.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: tool call.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
         Assert.Contains("[ERROR] Estado de execucao: erro. Execucao cancelada pelo usuario.", result.StdErr);
         Assert.DoesNotContain("Ocorreu um erro interno", result.StdErr);
@@ -923,6 +1037,14 @@ public sealed class ProgramMainTests
         params string[] args)
     {
         return ExecuteMainWithInputInternal(null, null, null, null, null, modelsExecutor, null, null, null, args);
+    }
+
+    private static ExecutionResult ExecuteMainWithInputAndModels(
+        string? stdIn,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        params string[] args)
+    {
+        return ExecuteMainWithInputInternal(stdIn, null, null, null, null, modelsExecutor, null, null, null, args);
     }
 
     private static ExecutionResult ExecuteMainWithConfig(
@@ -1092,6 +1214,15 @@ public sealed class ProgramMainTests
     private static async IAsyncEnumerable<string> StreamPromptWithModel(string prompt, string? model)
     {
         yield return $"Modelo: {model ?? "<padrao>"} | Prompt: {prompt}";
+        await Task.CompletedTask;
+    }
+
+    private static async IAsyncEnumerable<string> StreamPromptWithDiffInChunks()
+    {
+        yield return "```diff\n";
+        yield return "+nova linha\n";
+        yield return "-linha antiga\n";
+        yield return "```\n";
         await Task.CompletedTask;
     }
 

@@ -8,6 +8,7 @@ O formato segue o Keep a Changelog e o versionamento segue Semantic Versioning.
 
 ### Adicionado
 - Suporte a tema configuravel via `config` com chave `theme` e valores `auto`, `light`, `dark` e `high-contrast`.
+- Comandos interativos no modo `chat`: `/help`, `/clear`, `/models`, `/tools` e `/exit`.
 
 ## [0.1.0] - 2026-04-03
 

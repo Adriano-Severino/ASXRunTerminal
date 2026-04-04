@@ -10,6 +10,33 @@ internal static class Program
 {
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
+    private const string InteractiveChatPromptPrefix = "> ";
+    private static readonly string[] InteractiveChatCommandSuggestions =
+    [
+        "/help",
+        "/clear",
+        "/models",
+        "/tools",
+        "/exit"
+    ];
+    private static readonly string[] CliCommandSuggestions =
+    [
+        "ask",
+        "chat",
+        "doctor",
+        "models",
+        "history",
+        "config",
+        "skills",
+        "skill"
+    ];
+    private static readonly string[] CliOptionSuggestions =
+    [
+        "--model",
+        "--help",
+        "--version",
+        "--clear"
+    ];
     private static int _executionStateSpinnerStep;
     private static readonly Func<string, string?, CancellationToken, IAsyncEnumerable<string>> DefaultPromptExecutor =
         static (prompt, model, cancellationToken) => ExecuteDefaultPromptStreamAsync(prompt, model, cancellationToken);
@@ -308,7 +335,12 @@ internal static class Program
 
             if (parseResult.StartChat)
             {
-                return ExecuteChat(parseResult.SelectedModel, promptExecutor, cancelSignalRegistration);
+                return ExecuteChat(
+                    parseResult.SelectedModel,
+                    promptExecutor,
+                    modelsExecutor,
+                    cancelSignalRegistration,
+                    historyLoader);
             }
 
             if (parseResult.RunDoctor)
@@ -1103,6 +1135,7 @@ internal static class Program
         Console.WriteLine("Comandos:");
         Console.WriteLine("  ask \"prompt\"    Executa um prompt unico.");
         Console.WriteLine("  chat             Inicia o modo interativo.");
+        Console.WriteLine("                   Comandos no chat: /help, /clear, /models, /tools, /exit.");
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
         Console.WriteLine("  models           Lista os modelos locais do Ollama.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
@@ -1141,19 +1174,45 @@ internal static class Program
     private static int ExecuteChat(
         string? model,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
-        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration)
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        Func<IReadOnlyList<PromptHistoryEntry>> historyLoader)
     {
         ConsoleLogger.Info("Modo interativo iniciado. Digite 'exit' para sair.");
+        ConsoleLogger.Info("Comandos interativos disponiveis: /help, /clear, /models, /tools, /exit.");
+        ConsoleLogger.Info("Atalhos do teclado: setas para historico, Ctrl+R para busca incremental, Tab para autocomplete e Esc para cancelar busca.");
+
+        var historyPrompts = LoadInteractiveChatHistoryPrompts(historyLoader);
+        var inputNavigator = new ChatInputHistoryNavigator(historyPrompts);
+        var modelSuggestions = new Lazy<IReadOnlyList<string>>(
+            () => LoadInteractiveChatAutocompleteModelNames(model, modelsExecutor),
+            isThreadSafe: false);
+        var autocompleteEngine = new ChatAutocompleteEngine(
+            InteractiveChatCommandSuggestions,
+            CliCommandSuggestions,
+            CliOptionSuggestions,
+            () => modelSuggestions.Value);
 
         while (true)
         {
-            Console.Write("> ");
-            var input = Console.ReadLine();
+            var input = ReadInteractiveChatInput(inputNavigator, autocompleteEngine);
 
             if (input is null || IsExitCommand(input))
             {
                 ConsoleLogger.Info("Modo interativo encerrado.");
                 return (int)CliExitCode.Success;
+            }
+
+            var interactiveCommandResult = TryHandleInteractiveChatCommand(input, modelsExecutor);
+            if (interactiveCommandResult == InteractiveChatCommandResult.Exit)
+            {
+                ConsoleLogger.Info("Modo interativo encerrado.");
+                return (int)CliExitCode.Success;
+            }
+
+            if (interactiveCommandResult == InteractiveChatCommandResult.Handled)
+            {
+                continue;
             }
 
             var prompt = input.Trim();
@@ -1162,6 +1221,7 @@ internal static class Program
                 continue;
             }
 
+            inputNavigator.RememberPrompt(prompt);
             var wasCancelled = ExecutePrompt(prompt, model, promptExecutor, cancelSignalRegistration);
             if (wasCancelled)
             {
@@ -1169,6 +1229,333 @@ internal static class Program
             }
         }
 
+    }
+
+    private static InteractiveChatCommandResult TryHandleInteractiveChatCommand(
+        string input,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+    {
+        var trimmedInput = input.Trim();
+        if (!trimmedInput.StartsWith('/'))
+        {
+            return InteractiveChatCommandResult.NotACommand;
+        }
+
+        var separatorIndex = trimmedInput.IndexOfAny([' ', '\t']);
+        var command = separatorIndex < 0
+            ? trimmedInput
+            : trimmedInput[..separatorIndex];
+        var commandArguments = separatorIndex < 0
+            ? string.Empty
+            : trimmedInput[(separatorIndex + 1)..].Trim();
+
+        return command.ToLowerInvariant() switch
+        {
+            "/help" => HandleChatCommandWithoutArguments(command, commandArguments, WriteInteractiveChatHelp),
+            "/clear" => HandleChatCommandWithoutArguments(command, commandArguments, ClearInteractiveChatConsole),
+            "/models" => HandleChatCommandWithoutArguments(
+                command,
+                commandArguments,
+                () => ExecuteInteractiveModelsCommand(modelsExecutor)),
+            "/tools" => HandleChatCommandWithoutArguments(command, commandArguments, WriteInteractiveTools),
+            "/exit" => HandleExitInteractiveCommand(command, commandArguments),
+            _ => HandleUnknownInteractiveCommand(command)
+        };
+    }
+
+    private static InteractiveChatCommandResult HandleChatCommandWithoutArguments(
+        string command,
+        string commandArguments,
+        Action commandHandler)
+    {
+        if (!string.IsNullOrWhiteSpace(commandArguments))
+        {
+            ConsoleLogger.Error(
+                $"O comando interativo '{command}' nao aceita argumentos adicionais.");
+            ConsoleLogger.Info($"Use '{command}' sem argumentos.");
+            return InteractiveChatCommandResult.Handled;
+        }
+
+        commandHandler();
+        return InteractiveChatCommandResult.Handled;
+    }
+
+    private static InteractiveChatCommandResult HandleExitInteractiveCommand(
+        string command,
+        string commandArguments)
+    {
+        if (!string.IsNullOrWhiteSpace(commandArguments))
+        {
+            ConsoleLogger.Error(
+                $"O comando interativo '{command}' nao aceita argumentos adicionais.");
+            ConsoleLogger.Info($"Use '{command}' sem argumentos.");
+            return InteractiveChatCommandResult.Handled;
+        }
+
+        return InteractiveChatCommandResult.Exit;
+    }
+
+    private static InteractiveChatCommandResult HandleUnknownInteractiveCommand(string command)
+    {
+        ConsoleLogger.Error($"Comando interativo '{command}' nao e suportado.");
+        ConsoleLogger.Info("Use '/help' para listar os comandos interativos disponiveis.");
+        return InteractiveChatCommandResult.Handled;
+    }
+
+    private static void WriteInteractiveChatHelp()
+    {
+        ConsoleLogger.Info("Comandos interativos do chat:");
+        Console.WriteLine("- /help   Mostra esta ajuda de comandos interativos.");
+        Console.WriteLine("- /clear  Limpa a tela atual do terminal.");
+        Console.WriteLine("- /models Lista os modelos locais do Ollama.");
+        Console.WriteLine("- /tools  Mostra recursos locais disponiveis no CLI.");
+        Console.WriteLine("- /exit   Encerra o modo interativo.");
+        Console.WriteLine("- Tab     Autocompleta comandos, opcoes e nomes de modelos.");
+    }
+
+    private static void ClearInteractiveChatConsole()
+    {
+        if (!Console.IsOutputRedirected)
+        {
+            try
+            {
+                Console.Clear();
+            }
+            catch
+            {
+                // Em alguns terminais nao interativos o clear pode nao ser suportado.
+            }
+        }
+
+        ConsoleLogger.Info("Comando /clear executado.");
+    }
+
+    private static void ExecuteInteractiveModelsCommand(
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+    {
+        try
+        {
+            _ = ExecuteModels(modelsExecutor);
+        }
+        catch (Exception ex)
+        {
+            ConsoleLogger.Error($"Nao foi possivel listar modelos no chat: {ex.Message}");
+            ConsoleLogger.Info("Dica: execute 'asxrun doctor' e tente novamente.");
+        }
+    }
+
+    private static void WriteInteractiveTools()
+    {
+        ConsoleLogger.Info("Ferramentas e recursos locais disponiveis:");
+        Console.WriteLine("- Prompt em streaming no modo chat.");
+        Console.WriteLine("- Skills built-in: use 'asxrun skills' e 'asxrun skill <nome> ...'.");
+        Console.WriteLine("- Config local: use 'asxrun config get/set'.");
+        Console.WriteLine("- Historico local: use 'asxrun history'.");
+        Console.WriteLine("- Comandos de suporte: /help, /clear, /models, /tools, /exit.");
+    }
+
+    private static IReadOnlyList<string> LoadInteractiveChatHistoryPrompts(
+        Func<IReadOnlyList<PromptHistoryEntry>> historyLoader)
+    {
+        try
+        {
+            return historyLoader()
+                .OrderByDescending(static entry => entry.TimestampUtc)
+                .Select(static entry => entry.Prompt.Trim())
+                .Where(static prompt => prompt.Length > 0)
+                .ToArray();
+        }
+        catch (Exception ex)
+        {
+            ConsoleLogger.Error(
+                $"Nao foi possivel carregar o historico para navegacao no chat: {ex.Message}");
+            ConsoleLogger.Info("O chat continuara sem historico navegavel nesta sessao.");
+            return Array.Empty<string>();
+        }
+    }
+
+    private static IReadOnlyList<string> LoadInteractiveChatAutocompleteModelNames(
+        string? selectedModel,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+    {
+        var modelNames = new List<string>();
+        var knownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        AddModelName(selectedModel);
+        AddModelName(OllamaModelDefaults.DefaultModel);
+
+        try
+        {
+            var localModels = modelsExecutor(CancellationToken.None).GetAwaiter().GetResult();
+            foreach (var localModel in localModels)
+            {
+                AddModelName(localModel.Name);
+            }
+        }
+        catch (Exception ex)
+        {
+            ConsoleLogger.Info(
+                $"Autocomplete de modelos indisponivel no momento: {ex.Message}");
+        }
+
+        return modelNames;
+
+        void AddModelName(string? modelName)
+        {
+            if (string.IsNullOrWhiteSpace(modelName))
+            {
+                return;
+            }
+
+            var normalizedName = modelName.Trim();
+            if (!knownModels.Add(normalizedName))
+            {
+                return;
+            }
+
+            modelNames.Add(normalizedName);
+        }
+    }
+
+    private static string? ReadInteractiveChatInput(
+        ChatInputHistoryNavigator navigator,
+        ChatAutocompleteEngine autocompleteEngine)
+    {
+        ArgumentNullException.ThrowIfNull(navigator);
+        ArgumentNullException.ThrowIfNull(autocompleteEngine);
+
+        if (Console.IsInputRedirected)
+        {
+            Console.Write(InteractiveChatPromptPrefix);
+            return Console.ReadLine();
+        }
+
+        var previousRenderedLength = 0;
+        RenderInteractiveChatInput(navigator, ref previousRenderedLength);
+
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+
+            if ((key.Modifiers & ConsoleModifiers.Control) != 0
+                && key.Key == ConsoleKey.R)
+            {
+                autocompleteEngine.Reset();
+                navigator.StartIncrementalSearch();
+                RenderInteractiveChatInput(navigator, ref previousRenderedLength);
+                continue;
+            }
+
+            switch (key.Key)
+            {
+                case ConsoleKey.Enter:
+                    autocompleteEngine.Reset();
+                    navigator.AcceptIncrementalSearch();
+                    Console.WriteLine();
+                    return navigator.CurrentInput;
+                case ConsoleKey.UpArrow:
+                    autocompleteEngine.Reset();
+                    if (navigator.IsIncrementalSearchActive)
+                    {
+                        navigator.CycleIncrementalSearch(olderMatch: true);
+                    }
+                    else
+                    {
+                        navigator.MovePrevious();
+                    }
+
+                    break;
+                case ConsoleKey.DownArrow:
+                    autocompleteEngine.Reset();
+                    if (navigator.IsIncrementalSearchActive)
+                    {
+                        navigator.CycleIncrementalSearch(olderMatch: false);
+                    }
+                    else
+                    {
+                        navigator.MoveNext();
+                    }
+
+                    break;
+                case ConsoleKey.Backspace:
+                    autocompleteEngine.Reset();
+                    if (navigator.IsIncrementalSearchActive)
+                    {
+                        navigator.RemoveSearchCharacter();
+                    }
+                    else
+                    {
+                        navigator.RemoveLastInputCharacter();
+                    }
+
+                    break;
+                case ConsoleKey.Escape:
+                    autocompleteEngine.Reset();
+                    if (navigator.IsIncrementalSearchActive)
+                    {
+                        navigator.CancelIncrementalSearch();
+                    }
+                    else
+                    {
+                        navigator.ClearInput();
+                    }
+
+                    break;
+                case ConsoleKey.Tab:
+                    if (!navigator.IsIncrementalSearchActive)
+                    {
+                        var completedInput = autocompleteEngine.ApplyNextCompletion(navigator.CurrentInput);
+                        navigator.ReplaceInput(completedInput);
+                    }
+
+                    break;
+                default:
+                    if (!char.IsControl(key.KeyChar))
+                    {
+                        autocompleteEngine.Reset();
+                        if (navigator.IsIncrementalSearchActive)
+                        {
+                            navigator.AppendSearchCharacter(key.KeyChar);
+                        }
+                        else
+                        {
+                            navigator.AppendInputCharacter(key.KeyChar);
+                        }
+                    }
+
+                    break;
+            }
+
+            RenderInteractiveChatInput(navigator, ref previousRenderedLength);
+        }
+    }
+
+    private static void RenderInteractiveChatInput(
+        ChatInputHistoryNavigator navigator,
+        ref int previousRenderedLength)
+    {
+        var searchSuffix = BuildInteractiveChatSearchSuffix(navigator);
+        var renderedLine = $"{InteractiveChatPromptPrefix}{navigator.CurrentInput}{searchSuffix}";
+        var clearPaddingLength = Math.Max(0, previousRenderedLength - renderedLine.Length);
+        var clearPadding = clearPaddingLength == 0
+            ? string.Empty
+            : new string(' ', clearPaddingLength);
+
+        Console.Write($"\r{renderedLine}{clearPadding}");
+        previousRenderedLength = renderedLine.Length;
+    }
+
+    private static string BuildInteractiveChatSearchSuffix(ChatInputHistoryNavigator navigator)
+    {
+        if (!navigator.IsIncrementalSearchActive)
+        {
+            return string.Empty;
+        }
+
+        var searchStatus = navigator.HasIncrementalSearchMatch
+            ? "encontrado"
+            : "sem resultado";
+        return $"  [busca incremental: \"{navigator.SearchQuery}\" - {searchStatus}]";
     }
 
     private static bool ExecutePrompt(
@@ -1184,14 +1571,22 @@ internal static class Program
                 "Cancelamento solicitado via Ctrl+C. Interrompendo prompt em execucao."));
 
         WriteExecutionState(ExecutionState.Connecting);
+        WriteExecutionState(ExecutionState.ToolCall, "Encaminhando prompt para o runtime local.");
 
         try
         {
             WriteExecutionState(ExecutionState.Processing);
-            StreamPromptResponseAsync(prompt, model, promptExecutor, cancellationTokenSource.Token)
+            var streamMetrics = StreamPromptResponseAsync(
+                prompt,
+                model,
+                promptExecutor,
+                cancellationTokenSource.Token)
                 .GetAwaiter()
                 .GetResult();
-            WriteExecutionState(ExecutionState.Completed);
+            WriteExecutionState(ExecutionState.Diff, BuildDiffStateDetail(streamMetrics));
+            WriteExecutionState(
+                ExecutionState.Completed,
+                $"Resposta finalizada com {streamMetrics.ChunkCount} bloco(s) de streaming.");
             return false;
         }
         catch (OperationCanceledException) when (cancellationTokenSource.IsCancellationRequested)
@@ -1462,6 +1857,13 @@ internal static class Program
             || string.Equals(input.Trim(), "sair", StringComparison.OrdinalIgnoreCase);
     }
 
+    private enum InteractiveChatCommandResult
+    {
+        NotACommand,
+        Handled,
+        Exit
+    }
+
     private static string BuildSkillPrompt(SkillDefinition skill, string prompt)
     {
         return
@@ -1541,13 +1943,16 @@ internal static class Program
         return await ollamaClient.ListLocalModelsAsync(cancellationToken);
     }
 
-    private static async Task StreamPromptResponseAsync(
+    private static async Task<PromptStreamMetrics> StreamPromptResponseAsync(
         string prompt,
         string? model,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         CancellationToken cancellationToken)
     {
         var shouldWriteNewLine = false;
+        var chunkCount = 0;
+        var characterCount = 0;
+        var containsDiffMarkers = false;
         var currentDesignSystem = ConsoleLogger.CurrentDesignSystem;
         var responseRenderer = new TerminalResponseRenderer(
             AnsiTerminalRenderer.CreateDefault(currentDesignSystem),
@@ -1561,6 +1966,10 @@ internal static class Program
                 {
                     continue;
                 }
+
+                chunkCount++;
+                characterCount += chunk.Length;
+                containsDiffMarkers = containsDiffMarkers || ContainsDiffMarkers(chunk);
 
                 var renderedChunk = responseRenderer.RenderChunk(chunk);
                 if (renderedChunk.Length == 0)
@@ -1586,6 +1995,29 @@ internal static class Program
                 Console.WriteLine();
             }
         }
+
+        return new PromptStreamMetrics(
+            ChunkCount: chunkCount,
+            CharacterCount: characterCount,
+            ContainsDiffMarkers: containsDiffMarkers);
+    }
+
+    private static string BuildDiffStateDetail(PromptStreamMetrics streamMetrics)
+    {
+        var diffDetectionMessage = streamMetrics.ContainsDiffMarkers
+            ? "Diff identificado na resposta."
+            : "Nenhum bloco diff identificado na resposta.";
+
+        return $"{diffDetectionMessage} Conteudo recebido: {streamMetrics.CharacterCount} caractere(s).";
+    }
+
+    private static bool ContainsDiffMarkers(string chunk)
+    {
+        return chunk.Contains("```diff", StringComparison.OrdinalIgnoreCase)
+            || chunk.Contains("diff --git", StringComparison.Ordinal)
+            || chunk.Contains("@@", StringComparison.Ordinal)
+            || chunk.Contains("*** Begin Patch", StringComparison.Ordinal)
+            || chunk.Contains("*** End Patch", StringComparison.Ordinal);
     }
 
     private static IDisposable RegisterConsoleCancelHandler(
@@ -1685,6 +2117,11 @@ internal static class Program
             Interlocked.Exchange(ref _dispose, null)?.Invoke();
         }
     }
+
+    private readonly record struct PromptStreamMetrics(
+        int ChunkCount,
+        int CharacterCount,
+        bool ContainsDiffMarkers);
 
     private readonly record struct ParseResult(
         bool ShowHelp,

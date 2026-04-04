@@ -3,7 +3,9 @@ namespace ASXRunTerminal.Core;
 internal enum ExecutionState
 {
     Connecting,
+    ToolCall,
     Processing,
+    Diff,
     Completed,
     Error
 }

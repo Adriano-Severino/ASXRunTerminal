@@ -54,7 +54,9 @@ public sealed class TerminalDesignSystemTests
 
     [Theory]
     [InlineData(nameof(ExecutionState.Connecting), "conectando", "[CONN]", nameof(TerminalColorRole.Info))]
+    [InlineData(nameof(ExecutionState.ToolCall), "tool call", "[TOOL]", nameof(TerminalColorRole.Accent))]
     [InlineData(nameof(ExecutionState.Processing), "processando", "[WORK]", nameof(TerminalColorRole.Accent))]
+    [InlineData(nameof(ExecutionState.Diff), "diff", "[DIFF]", nameof(TerminalColorRole.Warning))]
     [InlineData(nameof(ExecutionState.Completed), "concluido", "[DONE]", nameof(TerminalColorRole.Success))]
     [InlineData(nameof(ExecutionState.Error), "erro", "[FAIL]", nameof(TerminalColorRole.Error))]
     public void TerminalExecutionStateToken_ImplicitOperator_MapsExpectedValues(

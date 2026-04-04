@@ -41,7 +41,9 @@ internal readonly record struct TerminalSpinnerFrame(string Value)
 internal static class TerminalVisualComponents
 {
     private static readonly string[] ConnectingFrames = [".", "..", "..."];
+    private static readonly string[] ToolCallFrames = [">", ">>", ">>>"];
     private static readonly string[] ProcessingFrames = ["|", "/", "-", "\\"];
+    private static readonly string[] DiffFrames = ["+", "+-", "-"];
     private const int MinimumSeparatorWidth = 3;
     private const int DefaultSeparatorWidth = 48;
 
@@ -113,7 +115,9 @@ internal static class TerminalVisualComponents
         return state switch
         {
             ExecutionState.Connecting => new TerminalSpinnerFrame(GetFrame(ConnectingFrames, step)),
+            ExecutionState.ToolCall => new TerminalSpinnerFrame(GetFrame(ToolCallFrames, step)),
             ExecutionState.Processing => new TerminalSpinnerFrame(GetFrame(ProcessingFrames, step)),
+            ExecutionState.Diff => new TerminalSpinnerFrame(GetFrame(DiffFrames, step)),
             ExecutionState.Completed => new TerminalSpinnerFrame("*"),
             ExecutionState.Error => new TerminalSpinnerFrame("x"),
             _ => throw new ArgumentOutOfRangeException(

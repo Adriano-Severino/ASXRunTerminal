@@ -98,10 +98,18 @@ internal readonly record struct TerminalExecutionStateToken(
                 Label: "conectando",
                 Badge: "[CONN]",
                 Style: TerminalDesignSystem.Default.InfoStyle),
+            ExecutionState.ToolCall => new(
+                Label: "tool call",
+                Badge: "[TOOL]",
+                Style: TerminalDesignSystem.Default.AccentStyle),
             ExecutionState.Processing => new(
                 Label: "processando",
                 Badge: "[WORK]",
                 Style: TerminalDesignSystem.Default.AccentStyle),
+            ExecutionState.Diff => new(
+                Label: "diff",
+                Badge: "[DIFF]",
+                Style: TerminalDesignSystem.Default.WarningStyle),
             ExecutionState.Completed => new(
                 Label: "concluido",
                 Badge: "[DONE]",
