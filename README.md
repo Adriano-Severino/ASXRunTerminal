@@ -191,6 +191,7 @@ Chaves suportadas:
 - `prompt_timeout_seconds`
 - `healthcheck_timeout_seconds`
 - `models_timeout_seconds`
+- `theme` (`auto`, `light`, `dark`, `high-contrast`)
 
 Exemplos:
 
@@ -199,6 +200,7 @@ asxrun config get default_model
 asxrun config set default_model qwen3.5:4b
 asxrun config set ollama_host http://127.0.0.1:11434/
 asxrun config set prompt_timeout_seconds 45
+asxrun config set theme high-contrast
 ```
 
 ## Historico

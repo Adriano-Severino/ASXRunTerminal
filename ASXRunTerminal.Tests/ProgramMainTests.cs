@@ -108,8 +108,11 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Executando comando unico 'ask'.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("[CONN]", result.StdOut);
+        Assert.Contains("[WORK]", result.StdOut);
         Assert.Contains($"Prompt: {prompt}", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
+        Assert.Contains("[DONE]", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
 
@@ -147,6 +150,23 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
         Assert.Contains("Prompt: resposta em stream", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AskCommand_WithCodeFenceStream_KeepsFenceAndCodeContent()
+    {
+        var result = ExecuteMainWithStreamingExecutor(
+            static (value, _) => StreamPromptWithCodeBlockInChunks(value),
+            "ask",
+            "gerar",
+            "exemplo");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("Resposta para: gerar exemplo", result.StdOut);
+        Assert.Contains("```csharp", result.StdOut);
+        Assert.Contains("Console.WriteLine(\"ok\");", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
@@ -530,7 +550,8 @@ public sealed class ProgramMainTests
             DefaultModel: "phi4-mini",
             PromptTimeout: TimeSpan.FromSeconds(31),
             HealthcheckTimeout: TimeSpan.FromSeconds(4),
-            ModelsTimeout: TimeSpan.FromSeconds(6));
+            ModelsTimeout: TimeSpan.FromSeconds(6),
+            Theme: TerminalThemeMode.Auto);
         var saveWasCalled = false;
         var result = ExecuteMainWithConfig(
             () => configured,
@@ -554,7 +575,8 @@ public sealed class ProgramMainTests
             DefaultModel: "qwen3.5:4b",
             PromptTimeout: TimeSpan.FromSeconds(30),
             HealthcheckTimeout: TimeSpan.FromSeconds(3),
-            ModelsTimeout: TimeSpan.FromSeconds(5));
+            ModelsTimeout: TimeSpan.FromSeconds(5),
+            Theme: TerminalThemeMode.Dark);
         UserRuntimeConfig? persisted = null;
 
         var result = ExecuteMainWithConfig(
@@ -570,6 +592,27 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Configuracao atualizada: prompt_timeout_seconds=45.", result.StdOut);
         Assert.NotNull(persisted);
         Assert.Equal(TimeSpan.FromSeconds(45), persisted.Value.PromptTimeout);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ConfigSetCommand_WithThemeKey_ReturnsSuccess_AndPersistsTheme()
+    {
+        UserRuntimeConfig? persisted = null;
+
+        var result = ExecuteMainWithConfig(
+            () => UserRuntimeConfig.Default,
+            config => persisted = config,
+            "config",
+            "set",
+            UserConfigFile.ThemeKey,
+            "high-contrast");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Atualizando configuracao 'theme'.", result.StdOut);
+        Assert.Contains("[INFO] Configuracao atualizada: theme=high-contrast.", result.StdOut);
+        Assert.NotNull(persisted);
+        Assert.Equal(TerminalThemeMode.HighContrast, persisted.Value.Theme);
         Assert.Equal(string.Empty, result.StdErr);
     }
 
@@ -642,7 +685,7 @@ public sealed class ProgramMainTests
 
         Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
         Assert.Contains("[ERROR] Nao foi possivel executar o comando. A chave de configuracao 'nao_existe' nao e suportada.", result.StdErr);
-        Assert.Contains("[ERROR] Sugestao: Chaves suportadas: ollama_host, default_model, prompt_timeout_seconds, healthcheck_timeout_seconds, models_timeout_seconds.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Chaves suportadas: ollama_host, default_model, prompt_timeout_seconds, healthcheck_timeout_seconds, models_timeout_seconds, theme.", result.StdErr);
         Assert.Equal(string.Empty, result.StdOut);
     }
 
@@ -743,6 +786,7 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
         Assert.Contains("[ERROR] Estado de execucao: erro. Nao foi possivel executar o prompt: falha simulada", result.StdErr);
+        Assert.Contains("[FAIL]", result.StdErr);
         Assert.Contains("[ERROR] Nao foi possivel concluir a execucao. Ocorreu um erro interno: falha simulada", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Tente novamente. Se o problema persistir, revise os logs acima.", result.StdErr);
     }
@@ -1031,6 +1075,17 @@ public sealed class ProgramMainTests
     {
         yield return "Prompt: ";
         yield return prompt;
+        await Task.CompletedTask;
+    }
+
+    private static async IAsyncEnumerable<string> StreamPromptWithCodeBlockInChunks(string prompt)
+    {
+        yield return "Resposta para: ";
+        yield return prompt;
+        yield return "\n```cs";
+        yield return "harp\n";
+        yield return "Console.WriteLine(\"ok\");\n";
+        yield return "```";
         await Task.CompletedTask;
     }
 

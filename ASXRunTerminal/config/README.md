@@ -14,3 +14,4 @@ Chaves suportadas:
 - `prompt_timeout_seconds`
 - `healthcheck_timeout_seconds`
 - `models_timeout_seconds`
+- `theme` (`auto`, `light`, `dark`, `high-contrast`)

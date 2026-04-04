@@ -4,6 +4,11 @@ Todas as mudancas relevantes deste projeto serao documentadas neste arquivo.
 
 O formato segue o Keep a Changelog e o versionamento segue Semantic Versioning.
 
+## [Unreleased]
+
+### Adicionado
+- Suporte a tema configuravel via `config` com chave `theme` e valores `auto`, `light`, `dark` e `high-contrast`.
+
 ## [0.1.0] - 2026-04-03
 
 ### Adicionado

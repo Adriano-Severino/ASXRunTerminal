@@ -1,4 +1,5 @@
 using System.Globalization;
+using ASXRunTerminal.Core;
 
 namespace ASXRunTerminal.Config;
 
@@ -11,6 +12,7 @@ internal static class UserConfigFile
     internal const string PromptTimeoutSecondsKey = "prompt_timeout_seconds";
     internal const string HealthcheckTimeoutSecondsKey = "healthcheck_timeout_seconds";
     internal const string ModelsTimeoutSecondsKey = "models_timeout_seconds";
+    internal const string ThemeKey = "theme";
 
     private static readonly UserRuntimeConfig DefaultConfig = UserRuntimeConfig.Default;
     internal static readonly IReadOnlyList<string> SupportedKeys =
@@ -19,7 +21,8 @@ internal static class UserConfigFile
         DefaultModelKey,
         PromptTimeoutSecondsKey,
         HealthcheckTimeoutSecondsKey,
-        ModelsTimeoutSecondsKey
+        ModelsTimeoutSecondsKey,
+        ThemeKey
     ];
 
     internal static bool TryNormalizeSupportedKey(string key, out string? normalizedKey)
@@ -53,6 +56,7 @@ internal static class UserConfigFile
             PromptTimeoutSecondsKey => ((int)config.PromptTimeout.TotalSeconds).ToString(CultureInfo.InvariantCulture),
             HealthcheckTimeoutSecondsKey => ((int)config.HealthcheckTimeout.TotalSeconds).ToString(CultureInfo.InvariantCulture),
             ModelsTimeoutSecondsKey => ((int)config.ModelsTimeout.TotalSeconds).ToString(CultureInfo.InvariantCulture),
+            ThemeKey => (string)(TerminalTheme)config.Theme,
             _ => throw new InvalidOperationException($"A chave de configuracao '{normalizedKey}' nao e suportada.")
         };
     }
@@ -91,6 +95,10 @@ internal static class UserConfigFile
                     trimmedValue,
                     ModelsTimeoutSecondsKey,
                     DefaultConfig.ModelsTimeout)
+            },
+            ThemeKey => currentConfig with
+            {
+                Theme = ResolveTheme(trimmedValue)
             },
             _ => throw new InvalidOperationException($"A chave de configuracao '{normalizedKey}' nao e suportada.")
         };
@@ -176,6 +184,7 @@ internal static class UserConfigFile
             {PromptTimeoutSecondsKey}={(int)config.PromptTimeout.TotalSeconds}
             {HealthcheckTimeoutSecondsKey}={(int)config.HealthcheckTimeout.TotalSeconds}
             {ModelsTimeoutSecondsKey}={(int)config.ModelsTimeout.TotalSeconds}
+            {ThemeKey}={(string)(TerminalTheme)config.Theme}
             {Environment.NewLine}
             """;
     }
@@ -219,7 +228,8 @@ internal static class UserConfigFile
             DefaultModel: GetEntryOrNull(entries, DefaultModelKey),
             PromptTimeoutSeconds: GetEntryOrNull(entries, PromptTimeoutSecondsKey),
             HealthcheckTimeoutSeconds: GetEntryOrNull(entries, HealthcheckTimeoutSecondsKey),
-            ModelsTimeoutSeconds: GetEntryOrNull(entries, ModelsTimeoutSecondsKey));
+            ModelsTimeoutSeconds: GetEntryOrNull(entries, ModelsTimeoutSecondsKey),
+            Theme: GetEntryOrNull(entries, ThemeKey));
     }
 
     private static string? GetEntryOrNull(IReadOnlyDictionary<string, string> entries, string key)
@@ -277,6 +287,17 @@ internal static class UserConfigFile
         return TimeSpan.FromSeconds(parsedSeconds);
     }
 
+    private static TerminalThemeMode ResolveTheme(string? configuredTheme)
+    {
+        if (string.IsNullOrWhiteSpace(configuredTheme))
+        {
+            return DefaultConfig.Theme;
+        }
+
+        TerminalTheme theme = new(configuredTheme.Trim());
+        return (TerminalThemeMode)theme;
+    }
+
     private static Uri NormalizeUri(Uri uri)
     {
         var uriString = uri.AbsoluteUri.Trim();
@@ -293,7 +314,8 @@ internal static class UserConfigFile
         string? DefaultModel,
         string? PromptTimeoutSeconds,
         string? HealthcheckTimeoutSeconds,
-        string? ModelsTimeoutSeconds)
+        string? ModelsTimeoutSeconds,
+        string? Theme)
     {
         public static implicit operator UserRuntimeConfig(RawConfigEntries entries)
         {
@@ -311,7 +333,8 @@ internal static class UserConfigFile
                 ModelsTimeout: ResolveTimeoutInSeconds(
                     entries.ModelsTimeoutSeconds,
                     ModelsTimeoutSecondsKey,
-                    DefaultConfig.ModelsTimeout));
+                    DefaultConfig.ModelsTimeout),
+                Theme: ResolveTheme(entries.Theme));
         }
     }
 }

@@ -17,13 +17,7 @@ internal readonly record struct ExecutionStateLabel(string Value)
 
     public static implicit operator ExecutionStateLabel(ExecutionState state)
     {
-        return new ExecutionStateLabel(state switch
-        {
-            ExecutionState.Connecting => "conectando",
-            ExecutionState.Processing => "processando",
-            ExecutionState.Completed => "concluido",
-            ExecutionState.Error => "erro",
-            _ => throw new ArgumentOutOfRangeException(nameof(state), state, "Estado de execucao invalido.")
-        });
+        TerminalExecutionStateToken token = state;
+        return new ExecutionStateLabel(token.Label);
     }
 }

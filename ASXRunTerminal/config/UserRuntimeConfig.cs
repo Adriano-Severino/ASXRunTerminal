@@ -7,12 +7,14 @@ internal readonly record struct UserRuntimeConfig(
     string DefaultModel,
     TimeSpan PromptTimeout,
     TimeSpan HealthcheckTimeout,
-    TimeSpan ModelsTimeout)
+    TimeSpan ModelsTimeout,
+    TerminalThemeMode Theme)
 {
     public static readonly Uri DefaultOllamaHost = new("http://127.0.0.1:11434/", UriKind.Absolute);
     public static readonly TimeSpan DefaultPromptTimeout = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan DefaultHealthcheckTimeout = TimeSpan.FromSeconds(3);
     public static readonly TimeSpan DefaultModelsTimeout = TimeSpan.FromSeconds(5);
+    public static readonly TerminalThemeMode DefaultTheme = TerminalThemeMode.Auto;
 
     public static UserRuntimeConfig Default =>
         new(
@@ -20,5 +22,6 @@ internal readonly record struct UserRuntimeConfig(
             DefaultModel: OllamaModelDefaults.DefaultModel,
             PromptTimeout: DefaultPromptTimeout,
             HealthcheckTimeout: DefaultHealthcheckTimeout,
-            ModelsTimeout: DefaultModelsTimeout);
+            ModelsTimeout: DefaultModelsTimeout,
+            Theme: DefaultTheme);
 }

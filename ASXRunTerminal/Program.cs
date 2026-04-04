@@ -10,6 +10,7 @@ internal static class Program
 {
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
+    private static int _executionStateSpinnerStep;
     private static readonly Func<string, string?, CancellationToken, IAsyncEnumerable<string>> DefaultPromptExecutor =
         static (prompt, model, cancellationToken) => ExecuteDefaultPromptStreamAsync(prompt, model, cancellationToken);
     private static readonly Func<CancellationToken, Task<OllamaHealthcheckResult>> DefaultHealthcheckExecutor =
@@ -39,7 +40,8 @@ internal static class Program
             DefaultHealthcheckExecutor,
             DefaultModelsExecutor,
             DefaultCancelSignalRegistration,
-            DefaultUserConfigInitializer);
+            DefaultUserConfigInitializer,
+            applyConfiguredTheme: true);
     }
 
     internal static int RunForTests(string[] args)
@@ -202,8 +204,8 @@ internal static class Program
             DefaultModelsExecutor,
             DefaultCancelSignalRegistration,
             NoOpUserConfigInitializer,
-            configLoader,
-            configSaver);
+            configLoader: configLoader,
+            configSaver: configSaver);
     }
 
     internal static int RunForTests(
@@ -248,6 +250,7 @@ internal static class Program
         Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Action userConfigInitializer,
+        bool applyConfiguredTheme = false,
         Func<UserRuntimeConfig>? configLoader = null,
         Action<UserRuntimeConfig>? configSaver = null,
         Func<IReadOnlyList<PromptHistoryEntry>>? historyLoader = null,
@@ -267,6 +270,12 @@ internal static class Program
         try
         {
             userConfigInitializer();
+
+            ConsoleLogger.ConfigureTheme(UserRuntimeConfig.Default.Theme);
+            if (applyConfiguredTheme)
+            {
+                TryConfigureTerminalTheme(configLoader);
+            }
 
             var parseResult = ParseArguments(args);
 
@@ -1066,7 +1075,10 @@ internal static class Program
 
     private static void WriteHelp()
     {
-        Console.WriteLine("ASXRunTerminal CLI");
+        TerminalHeader helpHeader = TerminalVisualComponents.BuildHeader(
+            "ASXRunTerminal CLI",
+            "Terminal local para produtividade com IA.");
+        Console.WriteLine((string)helpHeader);
         Console.WriteLine();
         Console.WriteLine("Uso:");
         Console.WriteLine($"  {CliName} [opcao]");
@@ -1095,6 +1107,7 @@ internal static class Program
         Console.WriteLine("  models           Lista os modelos locais do Ollama.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
+        Console.WriteLine($"                   Chaves suportadas: {GetSupportedConfigKeysLabel()}.");
         Console.WriteLine("  skills           Lista as skills padrao disponiveis.");
         Console.WriteLine("  skills show      Exibe os detalhes de uma skill.");
         Console.WriteLine("  skill            Executa um prompt usando uma skill padrao.");
@@ -1104,6 +1117,7 @@ internal static class Program
         Console.WriteLine($"  {(int)CliExitCode.RuntimeError}  Erro em tempo de execucao.");
         Console.WriteLine($"  {(int)CliExitCode.InvalidArguments}  Argumentos invalidos.");
         Console.WriteLine($"  {(int)CliExitCode.Cancelled}  Execucao cancelada pelo usuario.");
+        Console.WriteLine((string)TerminalVisualComponents.BuildSeparator(width: 48));
     }
 
     private static void WriteVersion()
@@ -1317,6 +1331,11 @@ internal static class Program
         }
 
         configSaver(updatedConfig);
+        if (string.Equals(configKey, UserConfigFile.ThemeKey, StringComparison.Ordinal))
+        {
+            ConsoleLogger.ConfigureTheme(updatedConfig.Theme);
+        }
+
         var updatedValue = UserConfigFile.GetValue(updatedConfig, configKey);
         ConsoleLogger.Info($"Configuracao atualizada: {configKey}={updatedValue}.");
         return (int)CliExitCode.Success;
@@ -1404,6 +1423,8 @@ internal static class Program
                 $"Exemplo: {CliName} config set {UserConfigFile.HealthcheckTimeoutSecondsKey} 3.",
             UserConfigFile.ModelsTimeoutSecondsKey =>
                 $"Exemplo: {CliName} config set {UserConfigFile.ModelsTimeoutSecondsKey} 5.",
+            UserConfigFile.ThemeKey =>
+                $"Exemplo: {CliName} config set {UserConfigFile.ThemeKey} auto.",
             _ => $"Chaves suportadas: {GetSupportedConfigKeysLabel()}."
         };
     }
@@ -1417,6 +1438,21 @@ internal static class Program
     {
         ConsoleLogger.Error(error.BuildPrimaryMessage());
         ConsoleLogger.Error(error.BuildSuggestionMessage());
+    }
+
+    private static void TryConfigureTerminalTheme(Func<UserRuntimeConfig> configLoader)
+    {
+        ArgumentNullException.ThrowIfNull(configLoader);
+
+        try
+        {
+            var userConfig = configLoader();
+            ConsoleLogger.ConfigureTheme(userConfig.Theme);
+        }
+        catch
+        {
+            ConsoleLogger.ConfigureTheme(UserRuntimeConfig.Default.Theme);
+        }
     }
 
     private static bool IsExitCommand(string input)
@@ -1444,14 +1480,17 @@ internal static class Program
         var message = detail is null
             ? $"Estado de execucao: {label}."
             : $"Estado de execucao: {label}. {detail}";
+        var spinnerStep = Interlocked.Increment(ref _executionStateSpinnerStep);
+        var visualSuffix = TerminalVisualComponents.BuildExecutionSuffix(state, spinnerStep);
+        var finalMessage = $"{message} {visualSuffix}";
 
         if (state == ExecutionState.Error)
         {
-            ConsoleLogger.Error(message);
+            ConsoleLogger.Error(finalMessage);
             return;
         }
 
-        ConsoleLogger.Info(message);
+        ConsoleLogger.Info(finalMessage);
     }
 
     private static string GetVersion()
@@ -1509,6 +1548,10 @@ internal static class Program
         CancellationToken cancellationToken)
     {
         var shouldWriteNewLine = false;
+        var currentDesignSystem = ConsoleLogger.CurrentDesignSystem;
+        var responseRenderer = new TerminalResponseRenderer(
+            AnsiTerminalRenderer.CreateDefault(currentDesignSystem),
+            currentDesignSystem);
 
         try
         {
@@ -1519,12 +1562,25 @@ internal static class Program
                     continue;
                 }
 
-                Console.Write(chunk);
-                shouldWriteNewLine = chunk[^1] is not ('\n' or '\r');
+                var renderedChunk = responseRenderer.RenderChunk(chunk);
+                if (renderedChunk.Length == 0)
+                {
+                    continue;
+                }
+
+                Console.Write(renderedChunk);
+                shouldWriteNewLine = renderedChunk[^1] is not ('\n' or '\r');
             }
         }
         finally
         {
+            var trailingOutput = responseRenderer.Flush();
+            if (trailingOutput.Length > 0)
+            {
+                Console.Write(trailingOutput);
+                shouldWriteNewLine = trailingOutput[^1] is not ('\n' or '\r');
+            }
+
             if (shouldWriteNewLine)
             {
                 Console.WriteLine();

@@ -27,6 +27,7 @@ public sealed class UserConfigFileTests
             Assert.Contains("prompt_timeout_seconds=30", fileContent);
             Assert.Contains("healthcheck_timeout_seconds=3", fileContent);
             Assert.Contains("models_timeout_seconds=5", fileContent);
+            Assert.Contains("theme=auto", fileContent);
         }
         finally
         {
@@ -86,6 +87,7 @@ public sealed class UserConfigFileTests
                 prompt_timeout_seconds=45
                 healthcheck_timeout_seconds=7
                 models_timeout_seconds=12
+                theme=high-contrast
                 """);
 
             var config = UserConfigFile.Load(() => userHome);
@@ -95,6 +97,7 @@ public sealed class UserConfigFileTests
             Assert.Equal(TimeSpan.FromSeconds(45), config.PromptTimeout);
             Assert.Equal(TimeSpan.FromSeconds(7), config.HealthcheckTimeout);
             Assert.Equal(TimeSpan.FromSeconds(12), config.ModelsTimeout);
+            Assert.Equal(TerminalThemeMode.HighContrast, config.Theme);
         }
         finally
         {
@@ -126,6 +129,7 @@ public sealed class UserConfigFileTests
             Assert.Equal(TimeSpan.FromSeconds(30), config.PromptTimeout);
             Assert.Equal(TimeSpan.FromSeconds(3), config.HealthcheckTimeout);
             Assert.Equal(TimeSpan.FromSeconds(5), config.ModelsTimeout);
+            Assert.Equal(TerminalThemeMode.Auto, config.Theme);
         }
         finally
         {
@@ -171,7 +175,8 @@ public sealed class UserConfigFileTests
             DefaultModel: "phi4-mini",
             PromptTimeout: TimeSpan.FromSeconds(61),
             HealthcheckTimeout: TimeSpan.FromSeconds(11),
-            ModelsTimeout: TimeSpan.FromSeconds(9));
+            ModelsTimeout: TimeSpan.FromSeconds(9),
+            Theme: TerminalThemeMode.Light);
 
         try
         {
@@ -212,13 +217,16 @@ public sealed class UserConfigFileTests
             DefaultModel: "qwen2.5-coder:7b",
             PromptTimeout: TimeSpan.FromSeconds(41),
             HealthcheckTimeout: TimeSpan.FromSeconds(8),
-            ModelsTimeout: TimeSpan.FromSeconds(13));
+            ModelsTimeout: TimeSpan.FromSeconds(13),
+            Theme: TerminalThemeMode.Dark);
 
         var hostValue = UserConfigFile.GetValue(config, UserConfigFile.OllamaHostKey);
         var timeoutValue = UserConfigFile.GetValue(config, UserConfigFile.PromptTimeoutSecondsKey);
+        var themeValue = UserConfigFile.GetValue(config, UserConfigFile.ThemeKey);
 
         Assert.Equal("http://localhost:8080/", hostValue);
         Assert.Equal("41", timeoutValue);
+        Assert.Equal("dark", themeValue);
     }
 
     [Fact]
@@ -255,6 +263,17 @@ public sealed class UserConfigFileTests
     }
 
     [Fact]
+    public void SetValue_WhenThemeValueUsesAlias_NormalizesAndUpdatesTheme()
+    {
+        var updated = UserConfigFile.SetValue(
+            UserRuntimeConfig.Default,
+            UserConfigFile.ThemeKey,
+            "HIGH_CONTRAST");
+
+        Assert.Equal(TerminalThemeMode.HighContrast, updated.Theme);
+    }
+
+    [Fact]
     public void SetValue_WhenValueIsBlank_ThrowsInvalidOperationException()
     {
         var exception = Assert.Throws<InvalidOperationException>(
@@ -285,6 +304,18 @@ public sealed class UserConfigFileTests
             () => UserConfigFile.SetValue(UserRuntimeConfig.Default, "invalid_key", "value"));
 
         Assert.Contains("nao e suportada", exception.Message);
+    }
+
+    [Fact]
+    public void SetValue_WhenThemeIsInvalid_ThrowsInvalidOperationException()
+    {
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => UserConfigFile.SetValue(
+                UserRuntimeConfig.Default,
+                UserConfigFile.ThemeKey,
+                "sepia"));
+
+        Assert.Contains("deve ser um entre", exception.Message);
     }
 
     [Fact]
