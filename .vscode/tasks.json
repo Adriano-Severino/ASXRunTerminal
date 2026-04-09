@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build projeto ASXRunTerminal",
+			"type": "shell",
+			"command": "dotnet build ASXRunTerminal/ASXRunTerminal.csproj",
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build"
+		}
+	]
+}

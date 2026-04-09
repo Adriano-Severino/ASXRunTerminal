@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 
@@ -414,7 +415,20 @@ public sealed class ProgramMainTests
             "chat");
 
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
-        Assert.Contains("[INFO] Ferramentas e recursos locais disponiveis:", result.StdOut);
+        Assert.Contains("[INFO] Ferramentas registradas no runtime local:", result.StdOut);
+        Assert.Contains("- echo:", result.StdOut);
+        Assert.Contains("- shell:", result.StdOut);
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            Assert.Contains("- powershell:", result.StdOut);
+        }
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            Assert.Contains("- bash:", result.StdOut);
+            Assert.Contains("- zsh:", result.StdOut);
+        }
+
         Assert.Contains("Skills built-in", result.StdOut);
         Assert.Contains("/help, /clear, /models, /tools, /exit", result.StdOut);
         Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);

@@ -297,6 +297,7 @@ internal static class Program
         try
         {
             userConfigInitializer();
+            var toolRuntime = CreateDefaultToolRuntime();
 
             ConsoleLogger.ConfigureTheme(UserRuntimeConfig.Default.Theme);
             if (applyConfiguredTheme)
@@ -339,6 +340,7 @@ internal static class Program
                     parseResult.SelectedModel,
                     promptExecutor,
                     modelsExecutor,
+                    toolRuntime,
                     cancelSignalRegistration,
                     historyLoader);
             }
@@ -1175,6 +1177,7 @@ internal static class Program
         string? model,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        IToolRuntime toolRuntime,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Func<IReadOnlyList<PromptHistoryEntry>> historyLoader)
     {
@@ -1203,7 +1206,7 @@ internal static class Program
                 return (int)CliExitCode.Success;
             }
 
-            var interactiveCommandResult = TryHandleInteractiveChatCommand(input, modelsExecutor);
+            var interactiveCommandResult = TryHandleInteractiveChatCommand(input, modelsExecutor, toolRuntime);
             if (interactiveCommandResult == InteractiveChatCommandResult.Exit)
             {
                 ConsoleLogger.Info("Modo interativo encerrado.");
@@ -1233,7 +1236,8 @@ internal static class Program
 
     private static InteractiveChatCommandResult TryHandleInteractiveChatCommand(
         string input,
-        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        IToolRuntime toolRuntime)
     {
         var trimmedInput = input.Trim();
         if (!trimmedInput.StartsWith('/'))
@@ -1257,7 +1261,10 @@ internal static class Program
                 command,
                 commandArguments,
                 () => ExecuteInteractiveModelsCommand(modelsExecutor)),
-            "/tools" => HandleChatCommandWithoutArguments(command, commandArguments, WriteInteractiveTools),
+            "/tools" => HandleChatCommandWithoutArguments(
+                command,
+                commandArguments,
+                () => WriteInteractiveTools(toolRuntime)),
             "/exit" => HandleExitInteractiveCommand(command, commandArguments),
             _ => HandleUnknownInteractiveCommand(command)
         };
@@ -1344,10 +1351,37 @@ internal static class Program
         }
     }
 
-    private static void WriteInteractiveTools()
+    private static void WriteInteractiveTools(IToolRuntime toolRuntime)
     {
-        ConsoleLogger.Info("Ferramentas e recursos locais disponiveis:");
-        Console.WriteLine("- Prompt em streaming no modo chat.");
+        ArgumentNullException.ThrowIfNull(toolRuntime);
+
+        ConsoleLogger.Info("Ferramentas registradas no runtime local:");
+
+        var tools = toolRuntime
+            .ListTools()
+            .OrderBy(static tool => tool.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (tools.Length == 0)
+        {
+            Console.WriteLine("- Nenhuma ferramenta registrada para a plataforma atual.");
+        }
+        else
+        {
+            foreach (var tool in tools)
+            {
+                var parametersLabel = tool.Parameters.Count == 0
+                    ? "sem parametros"
+                    : string.Join(
+                        ", ",
+                        tool.Parameters.Select(static parameter =>
+                            parameter.IsRequired
+                                ? $"{parameter.Name} (obrigatorio)"
+                                : $"{parameter.Name} (opcional)"));
+                Console.WriteLine($"- {tool.Name}: {tool.Description} Parametros: {parametersLabel}.");
+            }
+        }
+
         Console.WriteLine("- Skills built-in: use 'asxrun skills' e 'asxrun skill <nome> ...'.");
         Console.WriteLine("- Config local: use 'asxrun config get/set'.");
         Console.WriteLine("- Historico local: use 'asxrun history'.");
@@ -2018,6 +2052,14 @@ internal static class Program
             || chunk.Contains("@@", StringComparison.Ordinal)
             || chunk.Contains("*** Begin Patch", StringComparison.Ordinal)
             || chunk.Contains("*** End Patch", StringComparison.Ordinal);
+    }
+
+    private static IToolRuntime CreateDefaultToolRuntime()
+    {
+        return new ToolRuntime(
+            new EchoToolProvider(),
+            new PowerShellToolProvider(),
+            new UnixShellToolProvider());
     }
 
     private static IDisposable RegisterConsoleCancelHandler(

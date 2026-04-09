@@ -35,7 +35,10 @@ internal sealed class EchoToolProvider : IToolProvider
         ToolExecutionRequest request,
         CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromResult(ToolExecutionResult.Cancelled(TimeSpan.Zero));
+        }
 
         var stopwatch = Stopwatch.StartNew();
 

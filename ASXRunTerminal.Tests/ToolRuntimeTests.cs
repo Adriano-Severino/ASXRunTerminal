@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 
@@ -86,9 +87,13 @@ public sealed class ToolRuntimeTests
 
         Assert.True(result.IsSuccess);
         Assert.Equal("output text", result.Output);
+        Assert.Equal("output text", result.StdOut);
         Assert.Null(result.Error);
+        Assert.Equal(string.Empty, result.StdErr);
         Assert.Equal(0, result.ExitCode);
         Assert.Equal(duration, result.Duration);
+        Assert.False(result.IsTimedOut);
+        Assert.False(result.IsCancelled);
     }
 
     [Fact]
@@ -99,8 +104,48 @@ public sealed class ToolRuntimeTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(string.Empty, result.Output);
+        Assert.Equal(string.Empty, result.StdOut);
         Assert.Equal("erro inesperado", result.Error);
+        Assert.Equal("erro inesperado", result.StdErr);
         Assert.Equal(1, result.ExitCode);
+        Assert.Equal(duration, result.Duration);
+        Assert.False(result.IsTimedOut);
+        Assert.False(result.IsCancelled);
+    }
+
+    [Fact]
+    public void ToolExecutionResult_TimedOutFactory_SetsExpectedValues()
+    {
+        var duration = TimeSpan.FromMilliseconds(100);
+        var result = ToolExecutionResult.TimedOut(
+            duration: duration,
+            stdOut: "partial output",
+            stdErr: "timeout");
+
+        Assert.False(result.IsSuccess);
+        Assert.True(result.IsTimedOut);
+        Assert.False(result.IsCancelled);
+        Assert.Equal("partial output", result.StdOut);
+        Assert.Equal("timeout", result.StdErr);
+        Assert.Equal(ToolExecutionResult.TimeoutExitCode, result.ExitCode);
+        Assert.Equal(duration, result.Duration);
+    }
+
+    [Fact]
+    public void ToolExecutionResult_CancelledFactory_SetsExpectedValues()
+    {
+        var duration = TimeSpan.FromMilliseconds(80);
+        var result = ToolExecutionResult.Cancelled(
+            duration: duration,
+            stdOut: "partial output",
+            stdErr: "cancelled");
+
+        Assert.False(result.IsSuccess);
+        Assert.False(result.IsTimedOut);
+        Assert.True(result.IsCancelled);
+        Assert.Equal("partial output", result.StdOut);
+        Assert.Equal("cancelled", result.StdErr);
+        Assert.Equal(ToolExecutionResult.CancelledExitCode, result.ExitCode);
         Assert.Equal(duration, result.Duration);
     }
 
@@ -114,6 +159,8 @@ public sealed class ToolRuntimeTests
         Assert.Null(result.Error);
         Assert.Equal(0, result.ExitCode);
         Assert.Equal(TimeSpan.Zero, result.Duration);
+        Assert.False(result.IsTimedOut);
+        Assert.False(result.IsCancelled);
     }
 
     // ── EchoToolProvider ──
@@ -206,7 +253,7 @@ public sealed class ToolRuntimeTests
     }
 
     [Fact]
-    public async Task EchoToolProvider_ExecuteAsync_ThrowsWhenCancelled()
+    public async Task EchoToolProvider_ExecuteAsync_ReturnsCancelledWhenCancelled()
     {
         var provider = new EchoToolProvider();
         using var cts = new CancellationTokenSource();
@@ -215,8 +262,11 @@ public sealed class ToolRuntimeTests
             "echo",
             new Dictionary<string, string> { ["text"] = "test" });
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => provider.ExecuteAsync(request, cts.Token));
+        var result = await provider.ExecuteAsync(request, cts.Token);
+
+        Assert.False(result.IsSuccess);
+        Assert.True(result.IsCancelled);
+        Assert.Equal(ToolExecutionResult.CancelledExitCode, result.ExitCode);
     }
 
     // ── ToolRuntime ──
@@ -224,7 +274,9 @@ public sealed class ToolRuntimeTests
     [Fact]
     public void ToolRuntime_ListTools_AggregatesAllProviders()
     {
-        var runtime = new ToolRuntime(new EchoToolProvider(), new StubToolProvider("stub-tool"));
+        var runtime = new ToolRuntime(
+            [new EchoToolProvider(), new StubToolProvider("stub-tool")],
+            defaultShellSelector: () => null);
 
         var tools = runtime.ListTools();
 
@@ -236,11 +288,32 @@ public sealed class ToolRuntimeTests
     [Fact]
     public void ToolRuntime_ListTools_ReturnsEmpty_WhenNoProvidersRegistered()
     {
-        var runtime = new ToolRuntime(Array.Empty<IToolProvider>());
+        var runtime = new ToolRuntime(
+            Array.Empty<IToolProvider>(),
+            defaultShellSelector: () => null);
 
         var tools = runtime.ListTools();
 
         Assert.Empty(tools);
+    }
+
+    [Fact]
+    public void ToolRuntime_ListTools_IncludesShellAlias_WhenDefaultShellIsAvailable()
+    {
+        var runtime = new ToolRuntime(
+            [new StubToolProvider("bash")],
+            defaultShellSelector: () => "bash");
+
+        var tools = runtime.ListTools();
+
+        Assert.Equal(2, tools.Count);
+        var shellTool = Assert.Single(
+            tools,
+            static tool => string.Equals(tool.Name, "shell", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("bash", shellTool.Description);
+        Assert.Single(shellTool.Parameters);
+        Assert.Equal("script", shellTool.Parameters[0].Name);
+        Assert.True(shellTool.Parameters[0].IsRequired);
     }
 
     [Fact]
@@ -303,10 +376,114 @@ public sealed class ToolRuntimeTests
     }
 
     [Fact]
+    public async Task ToolRuntime_ExecuteAsync_ForShellAlias_DispatchesToResolvedShellProvider()
+    {
+        var runtime = new ToolRuntime(
+            [new StubToolProvider("bash")],
+            defaultShellSelector: () => "bash");
+        var request = new ToolExecutionRequest(
+            "shell",
+            new Dictionary<string, string> { ["input"] = "resolved" });
+
+        var result = await runtime.ExecuteAsync(request);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("stub:resolved", result.Output);
+    }
+
+    [Fact]
+    public async Task ToolRuntime_ExecuteAsync_ForShellAlias_ReturnsFailure_WhenShellCannotBeDetected()
+    {
+        var runtime = new ToolRuntime(
+            [new StubToolProvider("bash")],
+            defaultShellSelector: () => null);
+        var request = new ToolExecutionRequest(
+            "shell",
+            new Dictionary<string, string> { ["input"] = "ignored" });
+
+        var result = await runtime.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(127, result.ExitCode);
+        Assert.Contains("shell padrao", result.Error);
+    }
+
+    [Fact]
+    public async Task ToolRuntime_ExecuteAsync_ReturnsFailure_WhenTimeoutIsNonPositive()
+    {
+        var runtime = new ToolRuntime(new EchoToolProvider());
+        var request = new ToolExecutionRequest(
+            ToolName: "echo",
+            Arguments: new Dictionary<string, string> { ["text"] = "hello" },
+            Timeout: TimeSpan.Zero);
+
+        var result = await runtime.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("timeout", result.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task ToolRuntime_ExecuteAsync_ReturnsCancelled_WhenTokenIsAlreadyCancelled()
+    {
+        var runtime = new ToolRuntime(new EchoToolProvider());
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+        var request = new ToolExecutionRequest(
+            "echo",
+            new Dictionary<string, string> { ["text"] = "ignored" });
+
+        var result = await runtime.ExecuteAsync(request, cts.Token);
+
+        Assert.False(result.IsSuccess);
+        Assert.True(result.IsCancelled);
+        Assert.Equal(ToolExecutionResult.CancelledExitCode, result.ExitCode);
+    }
+
+    [Fact]
     public void ToolRuntime_Constructor_ThrowsWhenProvidersIsNull()
     {
         Assert.Throws<ArgumentNullException>(
             () => new ToolRuntime((IReadOnlyList<IToolProvider>)null!));
+    }
+
+    [Fact]
+    public void ToolRuntime_Constructor_ThrowsWhenProvidersContainsNullItem()
+    {
+        IReadOnlyList<IToolProvider> providers =
+        [
+            new EchoToolProvider(),
+            null!
+        ];
+
+        Assert.Throws<ArgumentException>(
+            () => new ToolRuntime(providers));
+    }
+
+    // ── ShellEnvironmentDetector ──
+
+    [Theory]
+    [InlineData("windows", "powershell")]
+    [InlineData("linux", "bash")]
+    [InlineData("osx", "zsh")]
+    public void ShellEnvironmentDetector_ResolveDefaultShell_ReturnsExpectedByPlatform(
+        string platform,
+        string expectedShell)
+    {
+        var actualShell = ShellEnvironmentDetector.ResolveDefaultShell(
+            CreatePlatformDetector(platform));
+
+        Assert.Equal(expectedShell, actualShell);
+    }
+
+    [Fact]
+    public void ShellEnvironmentDetector_ResolveDefaultShell_ReturnsNull_WhenPlatformIsUnknown()
+    {
+        var actualShell = ShellEnvironmentDetector.ResolveDefaultShell(
+            static _ => false);
+
+        Assert.Null(actualShell);
     }
 
     // ── Stub provider for testing ──
@@ -341,5 +518,16 @@ public sealed class ToolRuntimeTests
             return Task.FromResult(
                 ToolExecutionResult.Success($"stub:{input}", TimeSpan.Zero));
         }
+    }
+
+    private static Func<OSPlatform, bool> CreatePlatformDetector(string platform)
+    {
+        return osPlatform => platform switch
+        {
+            "windows" => osPlatform == OSPlatform.Windows,
+            "linux" => osPlatform == OSPlatform.Linux,
+            "osx" => osPlatform == OSPlatform.OSX,
+            _ => false
+        };
     }
 }
