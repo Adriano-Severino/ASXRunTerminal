@@ -3,6 +3,7 @@ using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 
 namespace ASXRunTerminal;
 
@@ -27,6 +28,7 @@ internal static class Program
         "models",
         "history",
         "config",
+        "mcp",
         "skills",
         "skill"
     ];
@@ -52,6 +54,12 @@ internal static class Program
         static () => UserHistoryFile.Load();
     private static readonly Action DefaultHistoryClearer =
         static () => UserHistoryFile.Clear();
+    private static readonly Func<IReadOnlyList<McpServerDefinition>> DefaultMcpServersLoader =
+        static () => McpServerCatalogFile.Load();
+    private static readonly Action<IReadOnlyList<McpServerDefinition>> DefaultMcpServersSaver =
+        static servers => McpServerCatalogFile.Save(servers);
+    private static readonly Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>> DefaultMcpServerTester =
+        static (server, cancellationToken) => ExecuteDefaultMcpServerTestAsync(server, cancellationToken);
     private static readonly Func<CancellationTokenSource, Action, IDisposable> DefaultCancelSignalRegistration =
         static (cancellationTokenSource, onCancellationRequested) =>
             RegisterConsoleCancelHandler(cancellationTokenSource, onCancellationRequested);
@@ -270,6 +278,27 @@ internal static class Program
             historyClearer: historyClearer);
     }
 
+    internal static int RunForTests(
+        string[] args,
+        Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader,
+        Action<IReadOnlyList<McpServerDefinition>> mcpServersSaver,
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null)
+    {
+        ArgumentNullException.ThrowIfNull(mcpServersLoader);
+        ArgumentNullException.ThrowIfNull(mcpServersSaver);
+
+        return Run(
+            args,
+            DefaultPromptExecutor,
+            DefaultHealthcheckExecutor,
+            DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer,
+            mcpServersLoader: mcpServersLoader,
+            mcpServersSaver: mcpServersSaver,
+            mcpServerTester: mcpServerTester ?? DefaultMcpServerTester);
+    }
+
     private static int Run(
         string[] args,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
@@ -281,7 +310,10 @@ internal static class Program
         Func<UserRuntimeConfig>? configLoader = null,
         Action<UserRuntimeConfig>? configSaver = null,
         Func<IReadOnlyList<PromptHistoryEntry>>? historyLoader = null,
-        Action? historyClearer = null)
+        Action? historyClearer = null,
+        Func<IReadOnlyList<McpServerDefinition>>? mcpServersLoader = null,
+        Action<IReadOnlyList<McpServerDefinition>>? mcpServersSaver = null,
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(healthcheckExecutor);
@@ -293,6 +325,9 @@ internal static class Program
         configSaver ??= DefaultConfigSaver;
         historyLoader ??= DefaultHistoryLoader;
         historyClearer ??= DefaultHistoryClearer;
+        mcpServersLoader ??= DefaultMcpServersLoader;
+        mcpServersSaver ??= DefaultMcpServersSaver;
+        mcpServerTester ??= DefaultMcpServerTester;
 
         try
         {
@@ -361,6 +396,35 @@ internal static class Program
                     historyLoader,
                     historyClearer,
                     parseResult.ClearHistory);
+            }
+
+            if (parseResult.RunMcpList)
+            {
+                return ExecuteMcpList(mcpServersLoader);
+            }
+
+            if (parseResult.McpServerToAdd is McpServerDefinition serverToAdd)
+            {
+                return ExecuteMcpAdd(
+                    serverToAdd,
+                    mcpServersLoader,
+                    mcpServersSaver);
+            }
+
+            if (parseResult.McpServerNameToRemove is string serverNameToRemove)
+            {
+                return ExecuteMcpRemove(
+                    serverNameToRemove,
+                    mcpServersLoader,
+                    mcpServersSaver);
+            }
+
+            if (parseResult.McpServerNameToTest is string serverNameToTest)
+            {
+                return ExecuteMcpTest(
+                    serverNameToTest,
+                    mcpServersLoader,
+                    mcpServerTester);
             }
 
             if (parseResult.ConfigGetKey is not null)
@@ -484,6 +548,11 @@ internal static class Program
         if (args.Length > 0 && string.Equals(args[0], "history", StringComparison.OrdinalIgnoreCase))
         {
             return ParseHistoryArguments(args);
+        }
+
+        if (args.Length > 0 && string.Equals(args[0], "mcp", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseMcpArguments(args);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "skills", StringComparison.OrdinalIgnoreCase))
@@ -663,6 +732,547 @@ internal static class Program
             Error: CliFriendlyError.InvalidArguments(
                 detail: "O comando 'history' aceita apenas a opcao '--clear'.",
                 suggestion: $"Exemplos: {CliName} history | {CliName} history --clear."));
+    }
+
+    private static ParseResult ParseMcpArguments(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "O comando 'mcp' exige uma acao: 'list', 'add', 'remove' ou 'test'.",
+                    suggestion: $"Exemplos: {CliName} mcp list | {CliName} mcp add meu-servidor --command node --arg server.js."));
+        }
+
+        var action = args[1].Trim();
+        if (string.Equals(action, "list", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length != 2)
+            {
+                return BuildMcpParseResult(
+                    error: CliFriendlyError.InvalidArguments(
+                        detail: "O comando 'mcp list' nao aceita argumentos adicionais.",
+                        suggestion: $"Exemplo: {CliName} mcp list."));
+            }
+
+            return BuildMcpParseResult(runMcpList: true);
+        }
+
+        if (string.Equals(action, "add", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseMcpAddArguments(args);
+        }
+
+        if (string.Equals(action, "remove", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseMcpRemoveArguments(args);
+        }
+
+        if (string.Equals(action, "test", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseMcpTestArguments(args);
+        }
+
+        return BuildMcpParseResult(
+            error: CliFriendlyError.InvalidArguments(
+                detail: $"A acao '{action}' nao e suportada no comando 'mcp'. Use 'list', 'add', 'remove' ou 'test'.",
+                suggestion: $"Exemplos: {CliName} mcp list | {CliName} mcp add meu-servidor --command node --arg server.js."));
+    }
+
+    private static ParseResult ParseMcpAddArguments(string[] args)
+    {
+        if (args.Length < 3 || string.IsNullOrWhiteSpace(args[2]))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "Voce precisa informar um nome para o comando 'mcp add'.",
+                    suggestion: $"Exemplo: {CliName} mcp add meu-servidor --command node --arg server.js."));
+        }
+
+        var serverName = args[2].Trim();
+        if (serverName.StartsWith('-'))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "O nome informado para o comando 'mcp add' e invalido.",
+                    suggestion: $"Exemplo: {CliName} mcp add meu-servidor --command node --arg server.js."));
+        }
+
+        string? command = null;
+        var commandArguments = new List<string>();
+        string? workingDirectory = null;
+        var environmentVariables = new Dictionary<string, string>(StringComparer.Ordinal);
+        string? endpoint = null;
+        var transportKind = McpRemoteTransportKind.Http;
+        var transportInformed = false;
+        string? messageEndpoint = null;
+        string? bearerToken = null;
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var index = 3; index < args.Length; index++)
+        {
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--command",
+                    out var commandValue,
+                    out var optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (command is not null)
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--command' foi informada mais de uma vez no comando 'mcp add'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --command node --arg server.js."));
+                }
+
+                command = commandValue;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--arg",
+                    out var argumentValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                commandArguments.Add(argumentValue);
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--cwd",
+                    out var workingDirectoryValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (workingDirectory is not null)
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--cwd' foi informada mais de uma vez no comando 'mcp add'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --command node --cwd . --arg server.js."));
+                }
+
+                workingDirectory = workingDirectoryValue;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--env",
+                    out var environmentVariableValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (!TryParseNameValuePair(environmentVariableValue, out var key, out var value))
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--env' exige o formato CHAVE=VALOR.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --command node --env NODE_ENV=production."));
+                }
+
+                environmentVariables[key] = value;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--url",
+                    out var endpointValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (endpoint is not null)
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--url' foi informada mais de uma vez no comando 'mcp add'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/rpc."));
+                }
+
+                endpoint = endpointValue;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--transport",
+                    out var transportValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (transportInformed)
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--transport' foi informada mais de uma vez no comando 'mcp add'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/sse --transport sse."));
+                }
+
+                if (string.Equals(transportValue, "http", StringComparison.OrdinalIgnoreCase))
+                {
+                    transportKind = McpRemoteTransportKind.Http;
+                }
+                else if (string.Equals(transportValue, "sse", StringComparison.OrdinalIgnoreCase))
+                {
+                    transportKind = McpRemoteTransportKind.Sse;
+                }
+                else
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--transport' aceita apenas 'http' ou 'sse'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/sse --transport sse."));
+                }
+                transportInformed = true;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--message-url",
+                    out var messageEndpointValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (messageEndpoint is not null)
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--message-url' foi informada mais de uma vez no comando 'mcp add'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/sse --message-url https://mcp.example.com/messages."));
+                }
+
+                messageEndpoint = messageEndpointValue;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--bearer-token",
+                    out var bearerTokenValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (bearerToken is not null)
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--bearer-token' foi informada mais de uma vez no comando 'mcp add'.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/rpc --bearer-token <token>."));
+                }
+
+                bearerToken = bearerTokenValue;
+                continue;
+            }
+
+            if (TryReadOptionValue(
+                    args,
+                    ref index,
+                    "--header",
+                    out var headerValue,
+                    out optionError))
+            {
+                if (optionError is CliFriendlyError error)
+                {
+                    return BuildMcpParseResult(error: error);
+                }
+
+                if (!TryParseNameValuePair(headerValue, out var headerName, out var headerContent))
+                {
+                    return BuildMcpParseResult(
+                        error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--header' exige o formato NOME=VALOR.",
+                            suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/rpc --header X-Api-Key=abc."));
+                }
+
+                headers[headerName] = headerContent;
+                continue;
+            }
+
+            if (string.Equals(args[index], "--transport", StringComparison.OrdinalIgnoreCase)
+                || args[index].StartsWith("--transport=", StringComparison.OrdinalIgnoreCase))
+            {
+                return BuildMcpParseResult(
+                    error: CliFriendlyError.InvalidArguments(
+                        detail: "A opcao '--transport' aceita apenas 'http' ou 'sse'.",
+                        suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/sse --transport sse."));
+            }
+
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: $"A opcao '{args[index]}' nao e reconhecida no comando 'mcp add'.",
+                    suggestion: $"Exemplo: {CliName} mcp add {serverName} --command node --arg server.js."));
+        }
+
+        var hasStdioConfiguration = !string.IsNullOrWhiteSpace(command);
+        var hasRemoteConfiguration = !string.IsNullOrWhiteSpace(endpoint);
+        if (hasStdioConfiguration == hasRemoteConfiguration)
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "Informe exatamente um tipo de servidor MCP: --command <cmd> (stdio) ou --url <endpoint> (remoto).",
+                    suggestion: $"Exemplos: {CliName} mcp add {serverName} --command node --arg server.js | {CliName} mcp add {serverName} --url https://mcp.example.com/rpc."));
+        }
+
+        if (hasStdioConfiguration)
+        {
+            if (transportInformed || messageEndpoint is not null || bearerToken is not null || headers.Count > 0)
+            {
+                return BuildMcpParseResult(
+                    error: CliFriendlyError.InvalidArguments(
+                        detail: "Opcoes remotas (--transport, --message-url, --bearer-token, --header) nao podem ser usadas com '--command'.",
+                        suggestion: $"Exemplo: {CliName} mcp add {serverName} --command node --arg server.js."));
+            }
+
+            McpServerProcessOptions processOptions;
+            try
+            {
+                processOptions = new McpServerProcessOptions(
+                    command: command!,
+                    arguments: commandArguments,
+                    workingDirectory: workingDirectory,
+                    environmentVariables: environmentVariables);
+            }
+            catch (ArgumentException ex)
+            {
+                return BuildMcpParseResult(
+                    error: CliFriendlyError.InvalidArguments(
+                        detail: ex.Message,
+                        suggestion: $"Exemplo: {CliName} mcp add {serverName} --command node --arg server.js."));
+            }
+
+            return BuildMcpParseResult(
+                mcpServerToAdd: McpServerDefinition.Stdio(serverName, processOptions));
+        }
+
+        if (commandArguments.Count > 0 || workingDirectory is not null || environmentVariables.Count > 0)
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "Opcoes de processo local (--arg, --cwd, --env) nao podem ser usadas com '--url'.",
+                    suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/rpc."));
+        }
+
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var endpointUri))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "A opcao '--url' exige uma URL absoluta.",
+                    suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/rpc."));
+        }
+
+        Uri? messageEndpointUri = null;
+        if (!string.IsNullOrWhiteSpace(messageEndpoint)
+            && !Uri.TryCreate(messageEndpoint, UriKind.Absolute, out messageEndpointUri))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "A opcao '--message-url' exige uma URL absoluta.",
+                    suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/sse --message-url https://mcp.example.com/messages."));
+        }
+
+        McpServerRemoteOptions remoteOptions;
+        try
+        {
+            remoteOptions = new McpServerRemoteOptions(
+                endpoint: endpointUri,
+                transportKind: transportKind,
+                messageEndpoint: messageEndpointUri,
+                authentication: string.IsNullOrWhiteSpace(bearerToken)
+                    ? McpAuthenticationOptions.None
+                    : McpAuthenticationOptions.Bearer(bearerToken),
+                headers: headers);
+        }
+        catch (ArgumentException ex)
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: ex.Message,
+                    suggestion: $"Exemplo: {CliName} mcp add {serverName} --url https://mcp.example.com/rpc."));
+        }
+
+        return BuildMcpParseResult(
+            mcpServerToAdd: McpServerDefinition.Remote(serverName, remoteOptions));
+    }
+
+    private static ParseResult ParseMcpRemoveArguments(string[] args)
+    {
+        if (args.Length != 3 || string.IsNullOrWhiteSpace(args[2]))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "O comando 'mcp remove' exige exatamente um nome de servidor.",
+                    suggestion: $"Exemplo: {CliName} mcp remove meu-servidor."));
+        }
+
+        var serverName = args[2].Trim();
+        if (serverName.StartsWith('-'))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "O nome informado para o comando 'mcp remove' e invalido.",
+                    suggestion: $"Exemplo: {CliName} mcp remove meu-servidor."));
+        }
+
+        return BuildMcpParseResult(mcpServerNameToRemove: serverName);
+    }
+
+    private static ParseResult ParseMcpTestArguments(string[] args)
+    {
+        if (args.Length != 3 || string.IsNullOrWhiteSpace(args[2]))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "O comando 'mcp test' exige exatamente um nome de servidor.",
+                    suggestion: $"Exemplo: {CliName} mcp test meu-servidor."));
+        }
+
+        var serverName = args[2].Trim();
+        if (serverName.StartsWith('-'))
+        {
+            return BuildMcpParseResult(
+                error: CliFriendlyError.InvalidArguments(
+                    detail: "O nome informado para o comando 'mcp test' e invalido.",
+                    suggestion: $"Exemplo: {CliName} mcp test meu-servidor."));
+        }
+
+        return BuildMcpParseResult(mcpServerNameToTest: serverName);
+    }
+
+    private static ParseResult BuildMcpParseResult(
+        CliFriendlyError? error = null,
+        bool runMcpList = false,
+        McpServerDefinition? mcpServerToAdd = null,
+        string? mcpServerNameToRemove = null,
+        string? mcpServerNameToTest = null)
+    {
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: null,
+            Error: error,
+            RunMcpList: runMcpList,
+            McpServerToAdd: mcpServerToAdd,
+            McpServerNameToRemove: mcpServerNameToRemove,
+            McpServerNameToTest: mcpServerNameToTest);
+    }
+
+    private static bool TryReadOptionValue(
+        string[] args,
+        ref int index,
+        string optionName,
+        out string optionValue,
+        out CliFriendlyError? error)
+    {
+        optionValue = string.Empty;
+        error = null;
+
+        var argument = args[index];
+        if (string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase))
+        {
+            if (index + 1 >= args.Length)
+            {
+                error = CliFriendlyError.InvalidArguments(
+                    detail: $"A opcao '{optionName}' exige um valor.",
+                    suggestion: $"Use '{optionName} <valor>'.");
+                return true;
+            }
+
+            optionValue = args[++index].Trim();
+            if (string.IsNullOrWhiteSpace(optionValue))
+            {
+                error = CliFriendlyError.InvalidArguments(
+                    detail: $"A opcao '{optionName}' exige um valor.",
+                    suggestion: $"Use '{optionName} <valor>'.");
+            }
+
+            return true;
+        }
+
+        var prefix = $"{optionName}=";
+        if (!argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        optionValue = argument[prefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(optionValue))
+        {
+            error = CliFriendlyError.InvalidArguments(
+                detail: $"A opcao '{optionName}' exige um valor.",
+                suggestion: $"Use '{optionName}=<valor>'.");
+        }
+
+        return true;
+    }
+
+    private static bool TryParseNameValuePair(
+        string rawValue,
+        out string name,
+        out string value)
+    {
+        name = string.Empty;
+        value = string.Empty;
+
+        var separatorIndex = rawValue.IndexOf('=');
+        if (separatorIndex <= 0 || separatorIndex == rawValue.Length - 1)
+        {
+            return false;
+        }
+
+        name = rawValue[..separatorIndex].Trim();
+        value = rawValue[(separatorIndex + 1)..].Trim();
+        return !string.IsNullOrWhiteSpace(name)
+            && !string.IsNullOrWhiteSpace(value);
     }
 
     private static ParseResult ParseConfigGetKey(string rawKey)
@@ -1121,6 +1731,11 @@ internal static class Program
         Console.WriteLine($"  {CliName} doctor");
         Console.WriteLine($"  {CliName} models");
         Console.WriteLine($"  {CliName} history [--clear]");
+        Console.WriteLine($"  {CliName} mcp list");
+        Console.WriteLine($"  {CliName} mcp add <nome> --command <cmd> [--arg <valor>]...");
+        Console.WriteLine($"  {CliName} mcp add <nome> --url <endpoint> [--transport http|sse]");
+        Console.WriteLine($"  {CliName} mcp remove <nome>");
+        Console.WriteLine($"  {CliName} mcp test <nome>");
         Console.WriteLine($"  {CliName} config get <chave>");
         Console.WriteLine($"  {CliName} config set <chave> <valor>");
         Console.WriteLine($"  {CliName} skills");
@@ -1141,6 +1756,7 @@ internal static class Program
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
         Console.WriteLine("  models           Lista os modelos locais do Ollama.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
+        Console.WriteLine("  mcp              Gerencia servidores MCP locais/remotos e executa teste de conectividade.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
         Console.WriteLine($"                   Chaves suportadas: {GetSupportedConfigKeysLabel()}.");
         Console.WriteLine("  skills           Lista as skills padrao disponiveis.");
@@ -1725,6 +2341,213 @@ internal static class Program
         return (int)CliExitCode.Success;
     }
 
+    private static int ExecuteMcpList(Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader)
+    {
+        ConsoleLogger.Info("Listando servidores MCP configurados.");
+        var servers = mcpServersLoader();
+        if (servers.Count == 0)
+        {
+            WriteExecutionState(ExecutionState.Completed, "Nenhum servidor MCP configurado.");
+            return (int)CliExitCode.Success;
+        }
+
+        WriteExecutionState(
+            ExecutionState.Completed,
+            $"{servers.Count} servidor(es) MCP configurado(s).");
+
+        foreach (var server in servers.OrderBy(static item => item.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"- {server.Name} ({GetMcpServerTransportLabel(server)})");
+
+            if (server.ProcessOptions is McpServerProcessOptions processOptions)
+            {
+                Console.WriteLine($"  command: {processOptions.Command}");
+                if (processOptions.Arguments.Count > 0)
+                {
+                    Console.WriteLine($"  args: {string.Join(' ', processOptions.Arguments)}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(processOptions.WorkingDirectory))
+                {
+                    Console.WriteLine($"  cwd: {processOptions.WorkingDirectory}");
+                }
+
+                if (processOptions.EnvironmentVariables.Count > 0)
+                {
+                    var environmentKeys = processOptions.EnvironmentVariables.Keys
+                        .OrderBy(static key => key, StringComparer.Ordinal)
+                        .ToArray();
+                    Console.WriteLine($"  env: {string.Join(", ", environmentKeys)}");
+                }
+
+                continue;
+            }
+
+            if (server.RemoteOptions is not McpServerRemoteOptions remoteOptions)
+            {
+                continue;
+            }
+
+            Console.WriteLine($"  endpoint: {remoteOptions.Endpoint.AbsoluteUri}");
+            if (remoteOptions.MessageEndpoint is Uri messageEndpoint)
+            {
+                Console.WriteLine($"  message-endpoint: {messageEndpoint.AbsoluteUri}");
+            }
+
+            var authenticationLabel = ResolveMcpAuthenticationLabel(remoteOptions.Authentication);
+            Console.WriteLine($"  auth: {authenticationLabel}");
+
+            if (remoteOptions.Headers.Count > 0)
+            {
+                var headerNames = remoteOptions.Headers.Keys
+                    .OrderBy(static key => key, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                Console.WriteLine($"  headers: {string.Join(", ", headerNames)}");
+            }
+        }
+
+        return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteMcpAdd(
+        McpServerDefinition serverToAdd,
+        Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader,
+        Action<IReadOnlyList<McpServerDefinition>> mcpServersSaver)
+    {
+        ConsoleLogger.Info($"Adicionando servidor MCP '{serverToAdd.Name}'.");
+        var existingServers = mcpServersLoader();
+        if (existingServers.Any(server =>
+                string.Equals(server.Name, serverToAdd.Name, StringComparison.OrdinalIgnoreCase)))
+        {
+            var duplicateError = CliFriendlyError.InvalidArguments(
+                detail: $"Ja existe um servidor MCP com o nome '{serverToAdd.Name}'.",
+                suggestion: $"Use '{CliName} mcp remove {serverToAdd.Name}' antes de adicionar novamente.");
+            WriteFriendlyError(duplicateError);
+            return (int)duplicateError.ExitCode;
+        }
+
+        var updatedServers = existingServers
+            .Append(serverToAdd)
+            .ToArray();
+        mcpServersSaver(updatedServers);
+        WriteExecutionState(
+            ExecutionState.Completed,
+            $"Servidor MCP '{serverToAdd.Name}' adicionado com sucesso.");
+        return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteMcpRemove(
+        string serverName,
+        Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader,
+        Action<IReadOnlyList<McpServerDefinition>> mcpServersSaver)
+    {
+        ConsoleLogger.Info($"Removendo servidor MCP '{serverName}'.");
+        var existingServers = mcpServersLoader();
+        var updatedServers = existingServers
+            .Where(server => !string.Equals(server.Name, serverName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (updatedServers.Length == existingServers.Count)
+        {
+            var notFoundError = CliFriendlyError.InvalidArguments(
+                detail: $"O servidor MCP '{serverName}' nao foi encontrado.",
+                suggestion: $"Use '{CliName} mcp list' para listar servidores configurados.");
+            WriteFriendlyError(notFoundError);
+            return (int)notFoundError.ExitCode;
+        }
+
+        mcpServersSaver(updatedServers);
+        WriteExecutionState(
+            ExecutionState.Completed,
+            $"Servidor MCP '{serverName}' removido com sucesso.");
+        return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteMcpTest(
+        string serverName,
+        Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader,
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>> mcpServerTester)
+    {
+        ConsoleLogger.Info($"Testando servidor MCP '{serverName}'.");
+        var servers = mcpServersLoader();
+        var selectedServer = servers.FirstOrDefault(server =>
+            string.Equals(server.Name, serverName, StringComparison.OrdinalIgnoreCase));
+        if (selectedServer is null)
+        {
+            var notFoundError = CliFriendlyError.InvalidArguments(
+                detail: $"O servidor MCP '{serverName}' nao foi encontrado.",
+                suggestion: $"Use '{CliName} mcp list' para listar servidores configurados.");
+            WriteFriendlyError(notFoundError);
+            return (int)notFoundError.ExitCode;
+        }
+
+        try
+        {
+            WriteExecutionState(ExecutionState.Connecting);
+            WriteExecutionState(ExecutionState.Processing);
+            var testResult = mcpServerTester(selectedServer, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+            if (testResult.IsSuccess)
+            {
+                WriteExecutionState(
+                    ExecutionState.Completed,
+                    testResult.Detail);
+                return (int)CliExitCode.Success;
+            }
+
+            WriteExecutionState(
+                ExecutionState.Error,
+                testResult.Detail);
+            var runtimeError = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel validar o servidor MCP '{serverName}'.",
+                suggestion: "Revise os parametros do servidor MCP e tente novamente.");
+            WriteFriendlyError(runtimeError);
+            return (int)runtimeError.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            WriteExecutionState(
+                ExecutionState.Error,
+                $"Falha ao testar servidor MCP '{serverName}'. {ex.Message}");
+            var runtimeError = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel testar o servidor MCP '{serverName}'.",
+                suggestion: "Revise os parametros do servidor MCP e tente novamente.");
+            WriteFriendlyError(runtimeError);
+            return (int)runtimeError.ExitCode;
+        }
+    }
+
+    private static string GetMcpServerTransportLabel(McpServerDefinition server)
+    {
+        if (server.ProcessOptions is not null)
+        {
+            return "stdio";
+        }
+
+        return server.RemoteOptions?.TransportKind switch
+        {
+            McpRemoteTransportKind.Http => "http",
+            McpRemoteTransportKind.Sse => "sse",
+            _ => "desconhecido"
+        };
+    }
+
+    private static string ResolveMcpAuthenticationLabel(McpAuthenticationOptions authentication)
+    {
+        if (!string.IsNullOrWhiteSpace(authentication.AuthorizationScheme))
+        {
+            return authentication.AuthorizationScheme.Trim().ToLowerInvariant();
+        }
+
+        if (!string.IsNullOrWhiteSpace(authentication.CustomHeaderName))
+        {
+            return $"header:{authentication.CustomHeaderName.Trim()}";
+        }
+
+        return "none";
+    }
+
     private static int ExecuteConfigGet(
         string configKey,
         Func<UserRuntimeConfig> configLoader)
@@ -1945,6 +2768,116 @@ internal static class Program
         }
 
         return assembly.GetName().Version?.ToString() ?? "0.0.0";
+    }
+
+    private static async Task<McpServerTestResult> ExecuteDefaultMcpServerTestAsync(
+        McpServerDefinition server,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+
+        await using IMcpClient mcpClient = CreateMcpClient(server);
+        await mcpClient.ConnectAsync(cancellationToken);
+
+        var initializeParameters = JsonSerializer.SerializeToElement(new
+        {
+            protocolVersion = "2024-11-05",
+            capabilities = new { },
+            clientInfo = new
+            {
+                name = CliName,
+                version = GetVersion()
+            }
+        });
+
+        var initializeResult = await mcpClient.SendRequestAsync(
+            method: "initialize",
+            parameters: initializeParameters,
+            timeout: TimeSpan.FromSeconds(15),
+            cancellationToken: cancellationToken);
+
+        await mcpClient.SendNotificationAsync(
+            method: "notifications/initialized",
+            cancellationToken: cancellationToken);
+
+        var discoveredTools = await McpToolDiscovery.DiscoverAsync(
+            mcpClient,
+            timeout: TimeSpan.FromSeconds(15),
+            cancellationToken: cancellationToken);
+
+        return McpServerTestResult.Success(
+            BuildMcpTestDetail(server, initializeResult, discoveredTools));
+    }
+
+    private static string BuildMcpTestDetail(
+        McpServerDefinition server,
+        JsonElement initializeResult,
+        IReadOnlyList<ToolDescriptor> discoveredTools)
+    {
+        ArgumentNullException.ThrowIfNull(discoveredTools);
+
+        var handshakeDetail = $"Servidor MCP '{server.Name}' respondeu ao handshake com sucesso.";
+
+        if (initializeResult.ValueKind == JsonValueKind.Object
+            && initializeResult.TryGetProperty("serverInfo", out var serverInfo)
+            && serverInfo.ValueKind == JsonValueKind.Object)
+        {
+            var serverName = TryReadStringProperty(serverInfo, "name");
+            var serverVersion = TryReadStringProperty(serverInfo, "version");
+
+            if (!string.IsNullOrWhiteSpace(serverName) && !string.IsNullOrWhiteSpace(serverVersion))
+            {
+                handshakeDetail = $"Servidor MCP '{server.Name}' respondeu ao handshake ({serverName} {serverVersion}).";
+            }
+            else if (!string.IsNullOrWhiteSpace(serverName))
+            {
+                handshakeDetail = $"Servidor MCP '{server.Name}' respondeu ao handshake ({serverName}).";
+            }
+        }
+
+        if (discoveredTools.Count == 0)
+        {
+            return $"{handshakeDetail} Nenhuma ferramenta MCP foi anunciada pelo servidor.";
+        }
+
+        var orderedToolNames = discoveredTools
+            .Select(static tool => tool.Name)
+            .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var listedToolNames = string.Join(", ", orderedToolNames.Take(5));
+        var truncatedLabel = orderedToolNames.Length > 5 ? ", ..." : string.Empty;
+
+        return $"{handshakeDetail} Ferramentas MCP descobertas: {orderedToolNames.Length} ({listedToolNames}{truncatedLabel}).";
+    }
+
+    private static string? TryReadStringProperty(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var propertyValue)
+            || propertyValue.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var value = propertyValue.GetString();
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : value.Trim();
+    }
+
+    private static IMcpClient CreateMcpClient(McpServerDefinition server)
+    {
+        if (server.ProcessOptions is McpServerProcessOptions processOptions)
+        {
+            return new McpStdioClient(processOptions);
+        }
+
+        if (server.RemoteOptions is McpServerRemoteOptions remoteOptions)
+        {
+            return new McpRemoteClient(remoteOptions);
+        }
+
+        throw new InvalidOperationException(
+            $"Servidor MCP '{server.Name}' sem configuracao de transporte.");
     }
 
     private static async Task<OllamaHealthcheckResult> ExecuteDefaultHealthcheckAsync(CancellationToken cancellationToken)
@@ -2180,6 +3113,10 @@ internal static class Program
         bool RunSkills = false,
         bool RunHistory = false,
         bool ClearHistory = false,
+        bool RunMcpList = false,
+        McpServerDefinition? McpServerToAdd = null,
+        string? McpServerNameToRemove = null,
+        string? McpServerNameToTest = null,
         string? ShowSkillName = null,
         string? RunSkillName = null,
         string? SkillPrompt = null);

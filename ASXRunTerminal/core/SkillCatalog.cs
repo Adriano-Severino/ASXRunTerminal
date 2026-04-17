@@ -2,6 +2,15 @@ namespace ASXRunTerminal.Core;
 
 internal static class SkillCatalog
 {
+    private const string ConfigDirectoryName = ".asxrun";
+    private const string SkillsDirectoryName = "skills";
+    private static readonly EnumerationOptions RecursiveFileEnumerationOptions = new()
+    {
+        RecurseSubdirectories = true,
+        IgnoreInaccessible = true,
+        ReturnSpecialDirectories = false
+    };
+
     private static readonly IReadOnlyList<SkillDefinition> BuiltInSkills =
     [
         new SkillDefinition(
@@ -51,9 +60,83 @@ internal static class SkillCatalog
                 """)
     ];
 
+    internal static readonly IReadOnlyList<string> SupportedSkillFileExtensions = [".md"];
+
     public static IReadOnlyList<SkillDefinition> List()
     {
         return BuiltInSkills;
+    }
+
+    public static IReadOnlyList<string> GetDiscoveryDirectories(
+        Func<string?>? currentDirectoryResolver = null,
+        Func<string?>? userHomeResolver = null)
+    {
+        var currentDirectory = ResolveCurrentDirectory(currentDirectoryResolver);
+        var userHomeDirectory = ResolveUserHome(userHomeResolver);
+        var localSkillsDirectory = Path.GetFullPath(
+            Path.Combine(currentDirectory, ConfigDirectoryName, SkillsDirectoryName));
+        var userSkillsDirectory = Path.GetFullPath(
+            Path.Combine(userHomeDirectory, ConfigDirectoryName, SkillsDirectoryName));
+
+        if (string.Equals(
+            localSkillsDirectory,
+            userSkillsDirectory,
+            GetPathComparison()))
+        {
+            return [localSkillsDirectory];
+        }
+
+        return [localSkillsDirectory, userSkillsDirectory];
+    }
+
+    public static IReadOnlyList<string> DiscoverSkillFiles(
+        IReadOnlyList<string>? discoveryDirectories = null,
+        IReadOnlyList<string>? supportedFileExtensions = null)
+    {
+        var resolvedDirectories = discoveryDirectories ?? GetDiscoveryDirectories();
+        var normalizedSupportedExtensions = NormalizeSupportedExtensions(
+            supportedFileExtensions ?? SupportedSkillFileExtensions);
+        if (resolvedDirectories.Count == 0 || normalizedSupportedExtensions.Count == 0)
+        {
+            return [];
+        }
+
+        var discoveredFiles = new List<string>();
+        var uniqueFiles = new HashSet<string>(GetPathComparer());
+
+        foreach (var directory in resolvedDirectories)
+        {
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                continue;
+            }
+
+            var resolvedDirectory = Path.GetFullPath(directory.Trim());
+            if (!Directory.Exists(resolvedDirectory))
+            {
+                continue;
+            }
+
+            foreach (var filePath in Directory.EnumerateFiles(
+                         resolvedDirectory,
+                         "*",
+                         RecursiveFileEnumerationOptions))
+            {
+                if (!normalizedSupportedExtensions.Contains(Path.GetExtension(filePath)))
+                {
+                    continue;
+                }
+
+                var resolvedFilePath = Path.GetFullPath(filePath);
+                if (uniqueFiles.Add(resolvedFilePath))
+                {
+                    discoveredFiles.Add(resolvedFilePath);
+                }
+            }
+        }
+
+        discoveredFiles.Sort(GetPathComparer());
+        return discoveredFiles;
     }
 
     public static bool TryFind(string skillName, out SkillDefinition skill)
@@ -76,5 +159,78 @@ internal static class SkillCatalog
 
         skill = default;
         return false;
+    }
+
+    private static string ResolveCurrentDirectory(Func<string?>? currentDirectoryResolver)
+    {
+        var resolver = currentDirectoryResolver ?? ResolveCurrentDirectoryFromEnvironment;
+        var currentDirectory = resolver();
+        if (string.IsNullOrWhiteSpace(currentDirectory))
+        {
+            throw new InvalidOperationException(
+                "Nao foi possivel resolver o diretorio atual para descobrir skills.");
+        }
+
+        return currentDirectory.Trim();
+    }
+
+    private static string ResolveUserHome(Func<string?>? userHomeResolver)
+    {
+        var resolver = userHomeResolver ?? ResolveUserHomeFromEnvironment;
+        var userHome = resolver();
+        if (string.IsNullOrWhiteSpace(userHome))
+        {
+            throw new InvalidOperationException(
+                "Nao foi possivel resolver o diretorio home do usuario para descobrir skills.");
+        }
+
+        return userHome.Trim();
+    }
+
+    private static HashSet<string> NormalizeSupportedExtensions(
+        IReadOnlyList<string> supportedFileExtensions)
+    {
+        var normalizedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var extension in supportedFileExtensions)
+        {
+            if (string.IsNullOrWhiteSpace(extension))
+            {
+                continue;
+            }
+
+            var normalizedExtension = extension.Trim();
+            if (!normalizedExtension.StartsWith('.'))
+            {
+                normalizedExtension = $".{normalizedExtension}";
+            }
+
+            normalizedExtensions.Add(normalizedExtension);
+        }
+
+        return normalizedExtensions;
+    }
+
+    private static StringComparison GetPathComparison()
+    {
+        return OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+    }
+
+    private static StringComparer GetPathComparer()
+    {
+        return OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+    }
+
+    private static string? ResolveCurrentDirectoryFromEnvironment()
+    {
+        return Directory.GetCurrentDirectory();
+    }
+
+    private static string? ResolveUserHomeFromEnvironment()
+    {
+        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     }
 }

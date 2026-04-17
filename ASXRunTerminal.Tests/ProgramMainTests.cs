@@ -49,6 +49,11 @@ public sealed class ProgramMainTests
         Assert.Contains("asxrun models", result.StdOut);
         Assert.Contains("asxrun history", result.StdOut);
         Assert.Contains("asxrun history [--clear]", result.StdOut);
+        Assert.Contains("asxrun mcp list", result.StdOut);
+        Assert.Contains("asxrun mcp add <nome> --command <cmd> [--arg <valor>]...", result.StdOut);
+        Assert.Contains("asxrun mcp add <nome> --url <endpoint> [--transport http|sse]", result.StdOut);
+        Assert.Contains("asxrun mcp remove <nome>", result.StdOut);
+        Assert.Contains("asxrun mcp test <nome>", result.StdOut);
         Assert.Contains("asxrun config get <chave>", result.StdOut);
         Assert.Contains("asxrun config set <chave> <valor>", result.StdOut);
         Assert.Contains("asxrun skills", result.StdOut);
@@ -669,6 +674,185 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_McpListCommand_WhenNoServersConfigured_ReturnsSuccess_AndWritesEmptyMessage()
+    {
+        var result = ExecuteMainWithMcp(
+            static () => Array.Empty<McpServerDefinition>(),
+            _ => { },
+            static (_, _) => Task.FromResult(McpServerTestResult.Success("ok")),
+            "mcp",
+            "list");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Listando servidores MCP configurados.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Nenhum servidor MCP configurado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpAddCommand_WithStdioConfiguration_ReturnsSuccess_AndPersistsServer()
+    {
+        IReadOnlyList<McpServerDefinition>? persistedServers = null;
+        var result = ExecuteMainWithMcp(
+            static () => Array.Empty<McpServerDefinition>(),
+            servers => persistedServers = servers.ToArray(),
+            static (_, _) => Task.FromResult(McpServerTestResult.Success("ok")),
+            "mcp",
+            "add",
+            "filesystem",
+            "--command",
+            "node",
+            "--arg",
+            "server.js",
+            "--cwd",
+            ".",
+            "--env",
+            "NODE_ENV=production");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Adicionando servidor MCP 'filesystem'.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Servidor MCP 'filesystem' adicionado com sucesso.", result.StdOut);
+        Assert.NotNull(persistedServers);
+        var persisted = Assert.Single(persistedServers!);
+        Assert.Equal("filesystem", persisted.Name);
+        Assert.NotNull(persisted.ProcessOptions);
+        Assert.Null(persisted.RemoteOptions);
+        Assert.Equal("node", persisted.ProcessOptions!.Command);
+        Assert.Equal("server.js", Assert.Single(persisted.ProcessOptions.Arguments));
+        Assert.Equal(".", persisted.ProcessOptions.WorkingDirectory);
+        Assert.Equal("production", persisted.ProcessOptions.EnvironmentVariables["NODE_ENV"]);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpAddCommand_WhenNameAlreadyExists_ReturnsInvalidArguments_AndDoesNotPersist()
+    {
+        var saveWasCalled = false;
+        var existingServers = new[]
+        {
+            McpServerDefinition.Stdio("filesystem", new McpServerProcessOptions("node"))
+        };
+        var result = ExecuteMainWithMcp(
+            () => existingServers,
+            _ => saveWasCalled = true,
+            static (_, _) => Task.FromResult(McpServerTestResult.Success("ok")),
+            "mcp",
+            "add",
+            "filesystem",
+            "--command",
+            "node");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[INFO] Adicionando servidor MCP 'filesystem'.", result.StdOut);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. Ja existe um servidor MCP com o nome 'filesystem'.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Use 'asxrun mcp remove filesystem' antes de adicionar novamente.", result.StdErr);
+        Assert.False(saveWasCalled);
+    }
+
+    [Fact]
+    public void Main_McpRemoveCommand_WhenServerExists_ReturnsSuccess_AndPersistsRemoval()
+    {
+        IReadOnlyList<McpServerDefinition>? persistedServers = null;
+        var existingServers = new[]
+        {
+            McpServerDefinition.Stdio("filesystem", new McpServerProcessOptions("node")),
+            McpServerDefinition.Remote("github", new McpServerRemoteOptions(new Uri("https://mcp.example.com/rpc")))
+        };
+        var result = ExecuteMainWithMcp(
+            () => existingServers,
+            servers => persistedServers = servers.ToArray(),
+            static (_, _) => Task.FromResult(McpServerTestResult.Success("ok")),
+            "mcp",
+            "remove",
+            "github");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Removendo servidor MCP 'github'.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Servidor MCP 'github' removido com sucesso.", result.StdOut);
+        Assert.NotNull(persistedServers);
+        var persisted = Assert.Single(persistedServers!);
+        Assert.Equal("filesystem", persisted.Name);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpRemoveCommand_WhenServerDoesNotExist_ReturnsInvalidArguments_AndWritesError()
+    {
+        var existingServers = new[]
+        {
+            McpServerDefinition.Stdio("filesystem", new McpServerProcessOptions("node"))
+        };
+        var result = ExecuteMainWithMcp(
+            () => existingServers,
+            _ => { },
+            static (_, _) => Task.FromResult(McpServerTestResult.Success("ok")),
+            "mcp",
+            "remove",
+            "github");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[INFO] Removendo servidor MCP 'github'.", result.StdOut);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O servidor MCP 'github' nao foi encontrado.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Use 'asxrun mcp list' para listar servidores configurados.", result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpTestCommand_WhenServerExistsAndTestSucceeds_ReturnsSuccess_AndWritesStates()
+    {
+        var existingServers = new[]
+        {
+            McpServerDefinition.Stdio("filesystem", new McpServerProcessOptions("node"))
+        };
+        string? testedServerName = null;
+        var result = ExecuteMainWithMcp(
+            () => existingServers,
+            _ => { },
+            (server, _) =>
+            {
+                testedServerName = server.Name;
+                return Task.FromResult(McpServerTestResult.Success("Servidor MCP testado com sucesso."));
+            },
+            "mcp",
+            "test",
+            "filesystem");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal("filesystem", testedServerName);
+        Assert.Contains("[INFO] Testando servidor MCP 'filesystem'.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Servidor MCP testado com sucesso.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpTestCommand_WhenServerDoesNotExist_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMainWithMcp(
+            static () => Array.Empty<McpServerDefinition>(),
+            _ => { },
+            static (_, _) => Task.FromResult(McpServerTestResult.Success("ok")),
+            "mcp",
+            "test",
+            "nao-existe");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[INFO] Testando servidor MCP 'nao-existe'.", result.StdOut);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O servidor MCP 'nao-existe' nao foi encontrado.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Use 'asxrun mcp list' para listar servidores configurados.", result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpCommand_WithoutAction_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("mcp");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'mcp' exige uma acao: 'list', 'add', 'remove' ou 'test'.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplos: asxrun mcp list | asxrun mcp add meu-servidor --command node --arg server.js.", result.StdErr);
+    }
+
+    [Fact]
     public void Main_ConfigGetCommand_WithSupportedKey_ReturnsSuccess_AndWritesConfiguredValue()
     {
         var configured = new UserRuntimeConfig(
@@ -1069,6 +1253,28 @@ public sealed class ProgramMainTests
         return ExecuteMainWithInputInternal(null, null, null, null, null, null, null, configLoader, configSaver, args);
     }
 
+    private static ExecutionResult ExecuteMainWithMcp(
+        Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader,
+        Action<IReadOnlyList<McpServerDefinition>> mcpServersSaver,
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>> mcpServerTester,
+        params string[] args)
+    {
+        return ExecuteMainWithInputInternal(
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            mcpServersLoader,
+            mcpServersSaver,
+            mcpServerTester,
+            args);
+    }
+
     private static ExecutionResult ExecuteMainWithHistory(
         Func<IReadOnlyList<PromptHistoryEntry>> historyLoader,
         params string[] args)
@@ -1117,6 +1323,37 @@ public sealed class ProgramMainTests
         Action<UserRuntimeConfig>? configSaver,
         params string[] args)
     {
+        return ExecuteMainWithInputInternal(
+            stdIn,
+            promptExecutor,
+            promptStreamingExecutor,
+            modelAwarePromptStreamingExecutor,
+            healthcheckExecutor,
+            modelsExecutor,
+            cancelSignalRegistration,
+            configLoader,
+            configSaver,
+            mcpServersLoader: null,
+            mcpServersSaver: null,
+            mcpServerTester: null,
+            args);
+    }
+
+    private static ExecutionResult ExecuteMainWithInputInternal(
+        string? stdIn,
+        Func<string, string>? promptExecutor,
+        Func<string, CancellationToken, IAsyncEnumerable<string>>? promptStreamingExecutor,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>>? modelAwarePromptStreamingExecutor,
+        Func<CancellationToken, Task<OllamaHealthcheckResult>>? healthcheckExecutor,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>>? modelsExecutor,
+        Func<CancellationTokenSource, Action, IDisposable>? cancelSignalRegistration,
+        Func<UserRuntimeConfig>? configLoader,
+        Action<UserRuntimeConfig>? configSaver,
+        Func<IReadOnlyList<McpServerDefinition>>? mcpServersLoader,
+        Action<IReadOnlyList<McpServerDefinition>>? mcpServersSaver,
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester,
+        params string[] args)
+    {
         var configuredPromptExecutors =
             (promptExecutor is not null ? 1 : 0)
             + (promptStreamingExecutor is not null ? 1 : 0)
@@ -1132,6 +1369,18 @@ public sealed class ProgramMainTests
         {
             throw new InvalidOperationException(
                 "Informe configLoader e configSaver juntos.");
+        }
+
+        if ((mcpServersLoader is null) != (mcpServersSaver is null))
+        {
+            throw new InvalidOperationException(
+                "Informe mcpServersLoader e mcpServersSaver juntos.");
+        }
+
+        if (mcpServerTester is not null && mcpServersLoader is null)
+        {
+            throw new InvalidOperationException(
+                "mcpServerTester exige mcpServersLoader e mcpServersSaver.");
         }
 
         var originalOut = Console.Out;
@@ -1164,6 +1413,17 @@ public sealed class ProgramMainTests
                     (null, null, null, null, null) => Program.RunForTests(args, modelsExecutor),
                     _ => throw new InvalidOperationException(
                         "Combinacao de executores de teste invalida para models.")
+                }
+                : mcpServersLoader is not null
+                ? (promptExecutor, promptStreamingExecutor, modelAwarePromptStreamingExecutor, healthcheckExecutor, modelsExecutor, cancelSignalRegistration) switch
+                {
+                    (null, null, null, null, null, null) => Program.RunForTests(
+                        args,
+                        mcpServersLoader,
+                        mcpServersSaver!,
+                        mcpServerTester),
+                    _ => throw new InvalidOperationException(
+                        "Combinacao de executores de teste invalida para mcp.")
                 }
                 : cancelSignalRegistration is null
                 ? (promptExecutor, promptStreamingExecutor, modelAwarePromptStreamingExecutor, healthcheckExecutor) switch

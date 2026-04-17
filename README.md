@@ -20,6 +20,7 @@ Funcionalidades ja disponiveis:
 - `doctor`: valida disponibilidade do Ollama;
 - `models`: lista modelos locais do Ollama;
 - `history`: mostra e limpa historico local;
+- `mcp list/add/remove/test`: gerencia servidores MCP locais/remotos;
 - `config get/set`: le e atualiza configuracao do usuario;
 - `skills`, `skills show`, `skill`: skills padrao para tarefas tecnicas.
 
@@ -195,8 +196,8 @@ asxrun ask "Resumo do arquivo Program.cs"
 
 Arquivos locais criados automaticamente:
 
-- Windows: `%USERPROFILE%\\.asxrun\\config` e `%USERPROFILE%\\.asxrun\\history`
-- Linux/macOS: `~/.asxrun/config` e `~/.asxrun/history`
+- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history` e `%USERPROFILE%\\.asxrun\\mcp-servers.json`
+- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history` e `~/.asxrun/mcp-servers.json`
 
 Chaves suportadas:
 
@@ -231,6 +232,38 @@ Limpar historico:
 asxrun history --clear
 ```
 
+## MCP
+
+Listar servidores MCP configurados:
+
+```bash
+asxrun mcp list
+```
+
+Adicionar servidor MCP via `stdio`:
+
+```bash
+asxrun mcp add filesystem --command node --arg server.js --cwd . --env NODE_ENV=production
+```
+
+Adicionar servidor MCP remoto:
+
+```bash
+asxrun mcp add github --url https://mcp.example.com/rpc --transport http --bearer-token <token>
+```
+
+Remover servidor MCP:
+
+```bash
+asxrun mcp remove filesystem
+```
+
+Testar conectividade MCP:
+
+```bash
+asxrun mcp test github
+```
+
 ## Skills
 
 Listar skills:
@@ -250,6 +283,20 @@ Executar prompt com skill:
 ```bash
 asxrun skill docs-writer "Escrever guia de onboarding para contribuidores."
 ```
+
+Formato padrao de arquivo de skill (`SKILL.md`):
+
+```md
+---
+name: code-review-api
+description: Revisa contratos, riscos e casos de erro de APIs.
+instruction: |
+  Atue como revisor tecnico de APIs.
+  Priorize corretude, regressao e testes faltantes.
+---
+```
+
+Metadados obrigatorios: `name`, `description`, `instruction`.
 
 ## Build e Testes
 
