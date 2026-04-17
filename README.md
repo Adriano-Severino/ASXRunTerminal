@@ -278,6 +278,12 @@ Ver detalhes de uma skill:
 asxrun skills show code-review
 ```
 
+Criar template de arquivo de skill no diretorio atual:
+
+```bash
+asxrun skills init
+```
+
 Executar prompt com skill:
 
 ```bash

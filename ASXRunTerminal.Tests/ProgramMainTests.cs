@@ -57,6 +57,8 @@ public sealed class ProgramMainTests
         Assert.Contains("asxrun config get <chave>", result.StdOut);
         Assert.Contains("asxrun config set <chave> <valor>", result.StdOut);
         Assert.Contains("asxrun skills", result.StdOut);
+        Assert.Contains("asxrun skills init", result.StdOut);
+        Assert.Contains("asxrun skills reload", result.StdOut);
         Assert.Contains("asxrun skill <nome> [--model <modelo>] \"prompt\"", result.StdOut);
         Assert.Contains("--model <nome>", result.StdOut);
         Assert.Contains("asxrun ask [--model <modelo>] \"prompt\"", result.StdOut);
@@ -1022,7 +1024,7 @@ public sealed class ProgramMainTests
         var result = ExecuteMain("skills");
 
         Assert.Equal((int)CliExitCode.Success, result.ExitCode);
-        Assert.Contains("[INFO] Listando skills padrao disponiveis.", result.StdOut);
+        Assert.Contains("[INFO] Listando skills disponiveis.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: concluido. 5 skill(s) disponivel(is).", result.StdOut);
         Assert.Contains("- code-review:", result.StdOut);
         Assert.Contains("- bugfix:", result.StdOut);
@@ -1051,6 +1053,253 @@ public sealed class ProgramMainTests
         Assert.Contains("[ERROR] Nao foi possivel executar o comando. A skill 'nao-existe' nao foi encontrada.", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Use 'asxrun skills' para listar as skills disponiveis.", result.StdErr);
         Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_SkillsReloadCommand_ReturnsSuccess_AndWritesCompletion()
+    {
+        var result = ExecuteMain("skills", "reload");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Recarregando cache de skills.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Cache de skills recarregado.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_SkillsInitCommand_WhenSkillTemplateDoesNotExist_ReturnsSuccess_AndCreatesSkillFile()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.SetCurrentDirectory(temporaryDirectory);
+
+            var result = ExecuteMain("skills", "init");
+            var skillFilePath = Path.Combine(temporaryDirectory, SkillFileFormat.SkillFileName);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Contains("[INFO] Criando template de skill no diretorio atual.", result.StdOut);
+            Assert.Contains("[INFO] Estado de execucao: concluido. Template de skill criado em", result.StdOut);
+            Assert.Contains(skillFilePath, result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+            Assert.True(File.Exists(skillFilePath));
+
+            var templateContent = File.ReadAllText(skillFilePath);
+            var parsedSkill = SkillFileFormat.Parse(templateContent, skillFilePath);
+
+            Assert.Equal("my-skill", parsedSkill.Name);
+            Assert.Equal("Explique em uma frase o objetivo da skill.", parsedSkill.Description);
+            Assert.Equal(
+                "Descreva como o modelo deve agir ao usar esta skill.",
+                parsedSkill.Instruction);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_SkillsInitCommand_WhenSkillTemplateAlreadyExists_ReturnsInvalidArguments_AndKeepsFile()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.SetCurrentDirectory(temporaryDirectory);
+            var skillFilePath = Path.Combine(temporaryDirectory, SkillFileFormat.SkillFileName);
+            const string existingContent = "conteudo-anterior";
+            File.WriteAllText(skillFilePath, existingContent);
+
+            var result = ExecuteMain("skills", "init");
+
+            Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+            Assert.Contains("[INFO] Criando template de skill no diretorio atual.", result.StdOut);
+            Assert.Contains("[ERROR] Nao foi possivel executar o comando. O arquivo 'SKILL.md' ja existe no diretorio atual.", result.StdErr);
+            Assert.Contains(skillFilePath, result.StdErr);
+            Assert.Contains("[ERROR] Sugestao: Remova ou renomeie", result.StdErr);
+            Assert.Contains("asxrun skills init", result.StdErr);
+            Assert.Equal(existingContent, File.ReadAllText(skillFilePath));
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_SkillsInitCommand_WithAdditionalArguments_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("skills", "init", "extra");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'skills init' nao aceita argumentos adicionais.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun skills init.", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_SkillsReloadCommand_WithAdditionalArguments_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("skills", "reload", "extra");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'skills reload' nao aceita argumentos adicionais.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun skills reload.", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_SkillsReloadCommand_RefreshesCachedSkillsWithoutRestartingProcess()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var skillsDirectory = Path.Combine(temporaryDirectory, ".asxrun", "skills");
+        var skillFilePath = Path.Combine(skillsDirectory, "cache-skill.md");
+        var skillName = $"cache-skill-{Guid.NewGuid():N}";
+
+        try
+        {
+            Directory.CreateDirectory(skillsDirectory);
+            Directory.SetCurrentDirectory(temporaryDirectory);
+            SkillCatalog.ReloadCache();
+
+            File.WriteAllText(
+                skillFilePath,
+                BuildValidSkillFileContent(
+                    skillName: skillName,
+                    description: "Descricao em cache v1.",
+                    instruction: "Instrucao v1."));
+
+            var firstListingResult = ExecuteMain("skills");
+            Assert.Equal((int)CliExitCode.Success, firstListingResult.ExitCode);
+            Assert.Contains($"- {skillName}: Descricao em cache v1.", firstListingResult.StdOut);
+
+            File.WriteAllText(
+                skillFilePath,
+                BuildValidSkillFileContent(
+                    skillName: skillName,
+                    description: "Descricao em cache v2.",
+                    instruction: "Instrucao v2."));
+
+            var staleListingResult = ExecuteMain("skills");
+            Assert.Equal((int)CliExitCode.Success, staleListingResult.ExitCode);
+            Assert.Contains($"- {skillName}: Descricao em cache v1.", staleListingResult.StdOut);
+            Assert.DoesNotContain($"- {skillName}: Descricao em cache v2.", staleListingResult.StdOut);
+
+            var reloadResult = ExecuteMain("skills", "reload");
+            Assert.Equal((int)CliExitCode.Success, reloadResult.ExitCode);
+
+            var refreshedListingResult = ExecuteMain("skills");
+            Assert.Equal((int)CliExitCode.Success, refreshedListingResult.ExitCode);
+            Assert.Contains($"- {skillName}: Descricao em cache v2.", refreshedListingResult.StdOut);
+            Assert.DoesNotContain($"- {skillName}: Descricao em cache v1.", refreshedListingResult.StdOut);
+        }
+        finally
+        {
+            SkillCatalog.ReloadCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_SkillsShowCommand_WhenFileSkillOverridesBuiltIn_PrefersLocalFileSkill()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var localSkillsDirectory = Path.Combine(temporaryDirectory, ".asxrun", "skills");
+        var localSkillPath = Path.Combine(localSkillsDirectory, "code-review-local.md");
+
+        try
+        {
+            Directory.CreateDirectory(localSkillsDirectory);
+            Directory.SetCurrentDirectory(temporaryDirectory);
+            SkillCatalog.ReloadCache();
+
+            File.WriteAllText(
+                localSkillPath,
+                BuildValidSkillFileContent(
+                    skillName: "code-review",
+                    description: "Code review local customizado.",
+                    instruction: "Use checklist local de code review."));
+
+            var result = ExecuteMain("skills", "show", "code-review");
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Contains("Skill: code-review", result.StdOut);
+            Assert.Contains("Descricao: Code review local customizado.", result.StdOut);
+            Assert.Contains("Use checklist local de code review.", result.StdOut);
+            Assert.DoesNotContain("Priorize corretude, regressao, seguranca", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            SkillCatalog.ReloadCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_SkillsShowCommand_WhenSkillExistsInLocalAndUserDirectories_PrefersProjectLocalSkill()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var userHomeDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var testRootSuffix = $"asxrun-tests-{Guid.NewGuid():N}";
+        var localSkillsDirectory = Path.Combine(temporaryDirectory, ".asxrun", "skills", "project");
+        Assert.False(string.IsNullOrWhiteSpace(userHomeDirectory));
+        var userSkillsRootDirectory = Path.GetFullPath(Path.Combine(userHomeDirectory, ".asxrun", "skills", testRootSuffix));
+        var userSkillsDirectory = Path.Combine(userSkillsRootDirectory, "user");
+        var skillName = $"precedence-{Guid.NewGuid():N}";
+
+        try
+        {
+            Directory.CreateDirectory(localSkillsDirectory);
+            Directory.CreateDirectory(userSkillsDirectory);
+            Directory.SetCurrentDirectory(temporaryDirectory);
+            SkillCatalog.ReloadCache();
+
+            File.WriteAllText(
+                Path.Combine(localSkillsDirectory, $"{skillName}.md"),
+                BuildValidSkillFileContent(
+                    skillName: skillName,
+                    description: "Descricao local do projeto.",
+                    instruction: "Instrucao local do projeto."));
+            File.WriteAllText(
+                Path.Combine(userSkillsDirectory, $"{skillName}.md"),
+                BuildValidSkillFileContent(
+                    skillName: skillName,
+                    description: "Descricao do usuario.",
+                    instruction: "Instrucao do usuario."));
+
+            var result = ExecuteMain("skills", "show", skillName);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Contains($"Skill: {skillName}", result.StdOut);
+            Assert.Contains("Descricao: Descricao local do projeto.", result.StdOut);
+            Assert.Contains("Instrucao local do projeto.", result.StdOut);
+            Assert.DoesNotContain("Descricao do usuario.", result.StdOut);
+            Assert.DoesNotContain("Instrucao do usuario.", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            SkillCatalog.ReloadCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+
+            if (Directory.Exists(userSkillsRootDirectory))
+            {
+                Directory.Delete(userSkillsRootDirectory, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -1543,5 +1792,30 @@ public sealed class ProgramMainTests
         public void Dispose()
         {
         }
+    }
+
+    private static string CreateTemporaryDirectory()
+    {
+        var directoryPath = Path.Combine(
+            Path.GetTempPath(),
+            $"asxrun-tests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directoryPath);
+        return directoryPath;
+    }
+
+    private static string BuildValidSkillFileContent(
+        string skillName,
+        string description,
+        string instruction)
+    {
+        return
+            $"""
+            ---
+            name: {skillName}
+            description: {description}
+            instruction: |
+              {instruction}
+            ---
+            """;
     }
 }

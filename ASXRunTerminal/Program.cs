@@ -446,9 +446,19 @@ internal static class Program
                 return ExecuteSkills();
             }
 
+            if (parseResult.RunSkillsReload)
+            {
+                return ExecuteSkillsReload();
+            }
+
             if (parseResult.ShowSkillName is not null)
             {
                 return ExecuteShowSkill(parseResult.ShowSkillName);
+            }
+
+            if (parseResult.RunSkillsInit)
+            {
+                return ExecuteSkillsInit();
             }
 
             if (parseResult.SkillPrompt is not null && parseResult.RunSkillName is not null)
@@ -1497,6 +1507,64 @@ internal static class Program
                 RunSkills: true);
         }
 
+        if (args.Length >= 2 && string.Equals(args[1], "init", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length > 2)
+            {
+                return new ParseResult(
+                    ShowHelp: false,
+                    ShowVersion: false,
+                    AskPrompt: null,
+                    StartChat: false,
+                    RunDoctor: false,
+                    RunModels: false,
+                    SelectedModel: null,
+                    Error: CliFriendlyError.InvalidArguments(
+                        detail: "O comando 'skills init' nao aceita argumentos adicionais.",
+                        suggestion: $"Exemplo: {CliName} skills init."));
+            }
+
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: null,
+                RunSkillsInit: true);
+        }
+
+        if (args.Length >= 2 && string.Equals(args[1], "reload", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length > 2)
+            {
+                return new ParseResult(
+                    ShowHelp: false,
+                    ShowVersion: false,
+                    AskPrompt: null,
+                    StartChat: false,
+                    RunDoctor: false,
+                    RunModels: false,
+                    SelectedModel: null,
+                    Error: CliFriendlyError.InvalidArguments(
+                        detail: "O comando 'skills reload' nao aceita argumentos adicionais.",
+                        suggestion: $"Exemplo: {CliName} skills reload."));
+            }
+
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: null,
+                RunSkillsReload: true);
+        }
+
         if (args.Length == 3 && string.Equals(args[1], "show", StringComparison.OrdinalIgnoreCase))
         {
             var skillName = args[2].Trim();
@@ -1536,8 +1604,8 @@ internal static class Program
             RunModels: false,
             SelectedModel: null,
             Error: CliFriendlyError.InvalidArguments(
-                detail: "O comando 'skills' aceita apenas 'skills' ou 'skills show <nome>'.",
-                suggestion: $"Exemplo: {CliName} skills show code-review."));
+                detail: "O comando 'skills' aceita apenas 'skills', 'skills show <nome>', 'skills init' ou 'skills reload'.",
+                suggestion: $"Exemplo: {CliName} skills init."));
     }
 
     private static ParseResult ParseSkillArguments(string[] args)
@@ -1740,6 +1808,8 @@ internal static class Program
         Console.WriteLine($"  {CliName} config set <chave> <valor>");
         Console.WriteLine($"  {CliName} skills");
         Console.WriteLine($"  {CliName} skills show <nome>");
+        Console.WriteLine($"  {CliName} skills init");
+        Console.WriteLine($"  {CliName} skills reload");
         Console.WriteLine($"  {CliName} skill <nome> [--model <modelo>] \"prompt\"");
         Console.WriteLine();
         Console.WriteLine("Opcoes:");
@@ -1759,8 +1829,10 @@ internal static class Program
         Console.WriteLine("  mcp              Gerencia servidores MCP locais/remotos e executa teste de conectividade.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
         Console.WriteLine($"                   Chaves suportadas: {GetSupportedConfigKeysLabel()}.");
-        Console.WriteLine("  skills           Lista as skills padrao disponiveis.");
+        Console.WriteLine("  skills           Lista as skills disponiveis.");
         Console.WriteLine("  skills show      Exibe os detalhes de uma skill.");
+        Console.WriteLine("  skills init      Cria um template SKILL.md no diretorio atual.");
+        Console.WriteLine("  skills reload    Recarrega o cache de skills sem reiniciar o CLI.");
         Console.WriteLine("  skill            Executa um prompt usando uma skill padrao.");
         Console.WriteLine();
         Console.WriteLine("Codigos de saida:");
@@ -2595,7 +2667,7 @@ internal static class Program
 
     private static int ExecuteSkills()
     {
-        ConsoleLogger.Info("Listando skills padrao disponiveis.");
+        ConsoleLogger.Info("Listando skills disponiveis.");
         var skills = SkillCatalog.List()
             .OrderBy(static skill => skill.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -2615,6 +2687,51 @@ internal static class Program
             Console.WriteLine($"- {skill.Name}: {skill.Description}");
         }
 
+        return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteSkillsReload()
+    {
+        ConsoleLogger.Info("Recarregando cache de skills.");
+        SkillCatalog.ReloadCache();
+        WriteExecutionState(
+            ExecutionState.Completed,
+            "Cache de skills recarregado.");
+        return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteSkillsInit()
+    {
+        ConsoleLogger.Info("Criando template de skill no diretorio atual.");
+        var resolvedTemplatePath = Path.GetFullPath(
+            Path.Combine(Directory.GetCurrentDirectory(), SkillFileFormat.SkillFileName));
+
+        if (File.Exists(resolvedTemplatePath))
+        {
+            var alreadyExistsError = CliFriendlyError.InvalidArguments(
+                detail: $"O arquivo '{SkillFileFormat.SkillFileName}' ja existe no diretorio atual.",
+                suggestion: $"Remova ou renomeie '{resolvedTemplatePath}' e execute '{CliName} skills init' novamente.");
+            WriteFriendlyError(alreadyExistsError);
+            return (int)alreadyExistsError.ExitCode;
+        }
+
+        try
+        {
+            var templateContent = SkillFileFormat.BuildTemplate();
+            File.WriteAllText(resolvedTemplatePath, templateContent);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            var runtimeError = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel criar o arquivo de skill em '{resolvedTemplatePath}'. {ex.Message}",
+                suggestion: "Verifique permissoes de escrita no diretorio atual e tente novamente.");
+            WriteFriendlyError(runtimeError);
+            return (int)runtimeError.ExitCode;
+        }
+
+        WriteExecutionState(
+            ExecutionState.Completed,
+            $"Template de skill criado em '{resolvedTemplatePath}'.");
         return (int)CliExitCode.Success;
     }
 
@@ -3111,12 +3228,14 @@ internal static class Program
         string? ConfigSetKey = null,
         string? ConfigSetValue = null,
         bool RunSkills = false,
+        bool RunSkillsReload = false,
         bool RunHistory = false,
         bool ClearHistory = false,
         bool RunMcpList = false,
         McpServerDefinition? McpServerToAdd = null,
         string? McpServerNameToRemove = null,
         string? McpServerNameToTest = null,
+        bool RunSkillsInit = false,
         string? ShowSkillName = null,
         string? RunSkillName = null,
         string? SkillPrompt = null);

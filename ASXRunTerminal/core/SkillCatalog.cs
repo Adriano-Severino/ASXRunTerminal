@@ -4,12 +4,14 @@ internal static class SkillCatalog
 {
     private const string ConfigDirectoryName = ".asxrun";
     private const string SkillsDirectoryName = "skills";
+    private static readonly object DefaultCacheLock = new();
     private static readonly EnumerationOptions RecursiveFileEnumerationOptions = new()
     {
         RecurseSubdirectories = true,
         IgnoreInaccessible = true,
         ReturnSpecialDirectories = false
     };
+    private static IReadOnlyList<SkillDefinition>? _cachedDefaultSkills;
 
     private static readonly IReadOnlyList<SkillDefinition> BuiltInSkills =
     [
@@ -62,9 +64,31 @@ internal static class SkillCatalog
 
     internal static readonly IReadOnlyList<string> SupportedSkillFileExtensions = [".md"];
 
-    public static IReadOnlyList<SkillDefinition> List()
+    public static IReadOnlyList<SkillDefinition> List(
+        IReadOnlyList<string>? discoveryDirectories = null,
+        IReadOnlyList<string>? supportedFileExtensions = null,
+        Func<string, string>? fileContentReader = null)
     {
-        return BuiltInSkills;
+        if (ShouldUseDefaultCache(
+                discoveryDirectories: discoveryDirectories,
+                supportedFileExtensions: supportedFileExtensions,
+                fileContentReader: fileContentReader))
+        {
+            return GetOrCreateCachedDefaultSkills();
+        }
+
+        return ResolveSkillsWithPrecedence(
+            discoveryDirectories: discoveryDirectories,
+            supportedFileExtensions: supportedFileExtensions,
+            fileContentReader: fileContentReader);
+    }
+
+    public static void ReloadCache()
+    {
+        lock (DefaultCacheLock)
+        {
+            _cachedDefaultSkills = null;
+        }
     }
 
     public static IReadOnlyList<string> GetDiscoveryDirectories(
@@ -139,7 +163,55 @@ internal static class SkillCatalog
         return discoveredFiles;
     }
 
-    public static bool TryFind(string skillName, out SkillDefinition skill)
+    public static IReadOnlyList<SkillDefinition> LoadFileSkills(
+        IReadOnlyList<string>? discoveryDirectories = null,
+        IReadOnlyList<string>? supportedFileExtensions = null,
+        Func<string, string>? fileContentReader = null)
+    {
+        var discoveredFiles = DiscoverSkillFiles(
+            discoveryDirectories: discoveryDirectories,
+            supportedFileExtensions: supportedFileExtensions);
+        if (discoveredFiles.Count == 0)
+        {
+            return [];
+        }
+
+        var resolvedFileContentReader = fileContentReader ?? ReadSkillFileContent;
+        var loadedSkills = new List<SkillDefinition>(discoveredFiles.Count);
+        var sourceBySkillName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var skillFilePath in discoveredFiles)
+        {
+            var resolvedSkillFilePath = Path.GetFullPath(skillFilePath);
+            var fileContent = ReadSkillFileWithFriendlyErrors(
+                resolvedSkillFilePath,
+                resolvedFileContentReader);
+
+            var skill = SkillFileFormat.Parse(
+                fileContent,
+                sourceLabel: resolvedSkillFilePath);
+
+            if (sourceBySkillName.TryGetValue(skill.Name, out var existingSourcePath))
+            {
+                throw new InvalidOperationException(
+                    BuildInvalidSkillFileMessage(
+                        resolvedSkillFilePath,
+                        $"O metadado obrigatorio '{SkillFileFormat.NameMetadataKey}' esta duplicado com o arquivo '{existingSourcePath}'. Cada skill de arquivo deve declarar um nome unico."));
+            }
+
+            sourceBySkillName[skill.Name] = resolvedSkillFilePath;
+            loadedSkills.Add(skill);
+        }
+
+        return loadedSkills;
+    }
+
+    public static bool TryFind(
+        string skillName,
+        out SkillDefinition skill,
+        IReadOnlyList<string>? discoveryDirectories = null,
+        IReadOnlyList<string>? supportedFileExtensions = null,
+        Func<string, string>? fileContentReader = null)
     {
         if (string.IsNullOrWhiteSpace(skillName))
         {
@@ -148,7 +220,10 @@ internal static class SkillCatalog
         }
 
         var trimmedName = skillName.Trim();
-        foreach (var candidate in BuiltInSkills)
+        foreach (var candidate in List(
+                     discoveryDirectories: discoveryDirectories,
+                     supportedFileExtensions: supportedFileExtensions,
+                     fileContentReader: fileContentReader))
         {
             if (string.Equals(candidate.Name, trimmedName, StringComparison.OrdinalIgnoreCase))
             {
@@ -159,6 +234,109 @@ internal static class SkillCatalog
 
         skill = default;
         return false;
+    }
+
+    private static IReadOnlyList<SkillDefinition> GetOrCreateCachedDefaultSkills()
+    {
+        lock (DefaultCacheLock)
+        {
+            if (_cachedDefaultSkills is not null)
+            {
+                return _cachedDefaultSkills;
+            }
+
+            _cachedDefaultSkills = ResolveSkillsWithPrecedence(
+                    discoveryDirectories: null,
+                    supportedFileExtensions: null,
+                    fileContentReader: null)
+                .ToArray();
+            return _cachedDefaultSkills;
+        }
+    }
+
+    private static bool ShouldUseDefaultCache(
+        IReadOnlyList<string>? discoveryDirectories,
+        IReadOnlyList<string>? supportedFileExtensions,
+        Func<string, string>? fileContentReader)
+    {
+        return discoveryDirectories is null
+            && supportedFileExtensions is null
+            && fileContentReader is null;
+    }
+
+    private static IReadOnlyList<SkillDefinition> ResolveSkillsWithPrecedence(
+        IReadOnlyList<string>? discoveryDirectories,
+        IReadOnlyList<string>? supportedFileExtensions,
+        Func<string, string>? fileContentReader)
+    {
+        var resolvedSkills = new List<SkillDefinition>(BuiltInSkills.Count);
+        var resolvedSkillNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var fileSkill in ResolveFileSkillsWithDirectoryPrecedence(
+                     discoveryDirectories: discoveryDirectories,
+                     supportedFileExtensions: supportedFileExtensions,
+                     fileContentReader: fileContentReader))
+        {
+            if (resolvedSkillNames.Add(fileSkill.Name))
+            {
+                resolvedSkills.Add(fileSkill);
+            }
+        }
+
+        foreach (var builtInSkill in BuiltInSkills)
+        {
+            if (resolvedSkillNames.Add(builtInSkill.Name))
+            {
+                resolvedSkills.Add(builtInSkill);
+            }
+        }
+
+        return resolvedSkills;
+    }
+
+    private static IReadOnlyList<SkillDefinition> ResolveFileSkillsWithDirectoryPrecedence(
+        IReadOnlyList<string>? discoveryDirectories,
+        IReadOnlyList<string>? supportedFileExtensions,
+        Func<string, string>? fileContentReader)
+    {
+        var resolvedDirectories = discoveryDirectories ?? GetDiscoveryDirectories();
+        if (resolvedDirectories.Count == 0)
+        {
+            return [];
+        }
+
+        var resolvedSkills = new List<SkillDefinition>();
+        var resolvedSkillNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var processedDirectories = new HashSet<string>(GetPathComparer());
+
+        foreach (var directory in resolvedDirectories)
+        {
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                continue;
+            }
+
+            var resolvedDirectory = Path.GetFullPath(directory.Trim());
+            if (!processedDirectories.Add(resolvedDirectory))
+            {
+                continue;
+            }
+
+            var fileSkills = LoadFileSkills(
+                discoveryDirectories: [resolvedDirectory],
+                supportedFileExtensions: supportedFileExtensions,
+                fileContentReader: fileContentReader);
+
+            foreach (var fileSkill in fileSkills)
+            {
+                if (resolvedSkillNames.Add(fileSkill.Name))
+                {
+                    resolvedSkills.Add(fileSkill);
+                }
+            }
+        }
+
+        return resolvedSkills;
     }
 
     private static string ResolveCurrentDirectory(Func<string?>? currentDirectoryResolver)
@@ -208,6 +386,34 @@ internal static class SkillCatalog
         }
 
         return normalizedExtensions;
+    }
+
+    private static string ReadSkillFileContent(string filePath)
+    {
+        return File.ReadAllText(filePath);
+    }
+
+    private static string ReadSkillFileWithFriendlyErrors(
+        string skillFilePath,
+        Func<string, string> fileContentReader)
+    {
+        try
+        {
+            return fileContentReader(skillFilePath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                BuildInvalidSkillFileMessage(
+                    skillFilePath,
+                    $"Nao foi possivel ler o arquivo. {ex.Message}"),
+                ex);
+        }
+    }
+
+    private static string BuildInvalidSkillFileMessage(string skillFilePath, string detail)
+    {
+        return $"Arquivo de skill invalido em '{skillFilePath}'. {detail}";
     }
 
     private static StringComparison GetPathComparison()
