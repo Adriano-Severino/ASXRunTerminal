@@ -1,16 +1,33 @@
 namespace ASXRunTerminal.Core;
 
+internal enum WorkspaceDestructiveOperationKind
+{
+    Delete = 1,
+    MoveOverwriteDirectory = 2
+}
+
+internal readonly record struct WorkspaceDestructiveOperation(
+    WorkspaceDestructiveOperationKind Kind,
+    string TargetPath,
+    bool IsRecursive,
+    string? SourcePath = null,
+    string? DestinationPath = null);
+
 internal sealed class WorkspaceFileOperations
 {
     private static readonly StringComparison PathComparison = GetPathComparison();
 
     private readonly string _workspaceRootDirectory;
     private readonly string _workspaceRootDirectoryWithSeparator;
+    private readonly Func<WorkspaceDestructiveOperation, bool> _destructiveOperationConfirmation;
 
-    public WorkspaceFileOperations(string workspaceRootDirectory)
+    public WorkspaceFileOperations(
+        string workspaceRootDirectory,
+        Func<WorkspaceDestructiveOperation, bool>? destructiveOperationConfirmation = null)
     {
         _workspaceRootDirectory = ResolveWorkspaceRootDirectory(workspaceRootDirectory);
         _workspaceRootDirectoryWithSeparator = EnsureTrailingDirectorySeparator(_workspaceRootDirectory);
+        _destructiveOperationConfirmation = destructiveOperationConfirmation ?? (_ => true);
     }
 
     public string WorkspaceRootDirectoryPath => _workspaceRootDirectory;
@@ -164,6 +181,10 @@ internal sealed class WorkspaceFileOperations
 
         if (File.Exists(resolvedPath))
         {
+            EnsureDestructiveOperationIsConfirmed(new WorkspaceDestructiveOperation(
+                Kind: WorkspaceDestructiveOperationKind.Delete,
+                TargetPath: resolvedPath,
+                IsRecursive: false));
             File.Delete(resolvedPath);
             return;
         }
@@ -176,6 +197,10 @@ internal sealed class WorkspaceFileOperations
                     $"Nao foi possivel excluir '{resolvedPath}'. O diretorio nao esta vazio e requer exclusao recursiva.");
             }
 
+            EnsureDestructiveOperationIsConfirmed(new WorkspaceDestructiveOperation(
+                Kind: WorkspaceDestructiveOperationKind.Delete,
+                TargetPath: resolvedPath,
+                IsRecursive: recursive));
             Directory.Delete(resolvedPath, recursive: recursive);
             return;
         }
@@ -295,6 +320,12 @@ internal sealed class WorkspaceFileOperations
                     $"Nao foi possivel mover para '{destinationPath}'. O diretorio de destino ja existe.");
             }
 
+            EnsureDestructiveOperationIsConfirmed(new WorkspaceDestructiveOperation(
+                Kind: WorkspaceDestructiveOperationKind.MoveOverwriteDirectory,
+                TargetPath: destinationPath,
+                IsRecursive: true,
+                SourcePath: sourcePath,
+                DestinationPath: destinationPath));
             Directory.Delete(destinationPath, recursive: true);
         }
 
@@ -461,5 +492,16 @@ internal sealed class WorkspaceFileOperations
         return OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
+    }
+
+    private void EnsureDestructiveOperationIsConfirmed(WorkspaceDestructiveOperation operation)
+    {
+        if (_destructiveOperationConfirmation(operation))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Operacao destrutiva cancelada para '{operation.TargetPath}'.");
     }
 }

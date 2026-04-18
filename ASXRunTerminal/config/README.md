@@ -7,6 +7,7 @@ Arquivo de usuario bootstrapado automaticamente:
 - `~/.asxrun/config`
 - `~/.asxrun/history`
 - `~/.asxrun/mcp-servers.json`
+- `~/.asxrun/patch-audit`
 
 Chaves suportadas:
 

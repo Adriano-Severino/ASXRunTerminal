@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using ASXRunTerminal.Config;
@@ -48,6 +49,7 @@ public sealed class ProgramMainTests
         Assert.Contains("asxrun doctor", result.StdOut);
         Assert.Contains("asxrun models", result.StdOut);
         Assert.Contains("asxrun context", result.StdOut);
+        Assert.Contains("asxrun patch [--dry-run] <arquivo-json>", result.StdOut);
         Assert.Contains("asxrun history", result.StdOut);
         Assert.Contains("asxrun history [--clear]", result.StdOut);
         Assert.Contains("asxrun mcp list", result.StdOut);
@@ -647,6 +649,276 @@ public sealed class ProgramMainTests
         Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'context' nao aceita argumentos adicionais.", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun context.", result.StdErr);
         Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithDryRun_ReturnsSuccess_AndDoesNotPersistChanges()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(targetFilePath, "linha 1\nlinha 2");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("edit", "src/Program.cs", "linha 1\nlinha 2 atualizada", null)));
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMain("patch", "--dry-run", patchFilePath);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Equal("linha 1\nlinha 2", File.ReadAllText(targetFilePath));
+            Assert.Contains("[INFO] Aplicando patch de workspace.", result.StdOut);
+            Assert.Contains("[INFO] Estado de execucao: diff. Modo --dry-run habilitado. Diff gerado sem alterar arquivos.", result.StdOut);
+            Assert.Contains("--- a/src/Program.cs", result.StdOut);
+            Assert.Contains("+++ b/src/Program.cs", result.StdOut);
+            Assert.Contains("+linha 2 atualizada", result.StdOut);
+            Assert.Contains("- modo-dry-run: sim", result.StdOut);
+            Assert.Contains("- alteracoes-aplicadas: 0", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithoutDryRun_ReturnsSuccess_AndPersistsChanges()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(targetFilePath, "linha 1\nlinha 2");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("edit", "src/Program.cs", "linha 1\nlinha 2 atualizada", null)));
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMain("patch", patchFilePath);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Equal("linha 1\nlinha 2 atualizada", File.ReadAllText(targetFilePath));
+            Assert.Contains("[INFO] Estado de execucao: diff. Diff gerado para alteracoes aplicadas no workspace.", result.StdOut);
+            Assert.Contains("[INFO] Estado de execucao: concluido. 1 alteracao(oes) aplicada(s) no workspace.", result.StdOut);
+            Assert.Contains("- modo-dry-run: nao", result.StdOut);
+            Assert.Contains("- alteracoes-aplicadas: 1", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithoutDryRun_AppendsAuditEntryWithSessionMetadata()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var expectedAuditPath = Path.Combine(temporaryDirectory, "patch-audit");
+        var originalDirectory = Directory.GetCurrentDirectory();
+        WorkspacePatchAuditEntry? capturedAuditEntry = null;
+        var appendCount = 0;
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(targetFilePath, "linha 1\nlinha 2");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("edit", "src/Program.cs", "linha 1\nlinha 2 atualizada", null)));
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMainWithWorkspacePatchAudit(
+                entry =>
+                {
+                    appendCount++;
+                    capturedAuditEntry = entry;
+                    return expectedAuditPath;
+                },
+                "patch",
+                patchFilePath);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Equal(1, appendCount);
+            Assert.True(capturedAuditEntry.HasValue);
+
+            var auditEntry = capturedAuditEntry.Value;
+            Assert.Equal("patch", auditEntry.Command);
+            Assert.False(auditEntry.IsPreviewOnly);
+            Assert.True(auditEntry.SessionSequence > 0);
+            Assert.False(string.IsNullOrWhiteSpace(auditEntry.SessionId));
+            Assert.Equal(Path.GetFullPath(workspaceRootDirectory), auditEntry.WorkspaceRootDirectory);
+            Assert.Equal(Path.GetFullPath(patchFilePath), auditEntry.PatchRequestFilePath);
+            Assert.Equal(1, auditEntry.PlannedChangeCount);
+            Assert.Equal(1, auditEntry.AppliedChangeCount);
+            Assert.Equal(0, auditEntry.SkippedChangeCount);
+            Assert.Single(auditEntry.Files);
+            Assert.Contains("- sessao-auditoria:", result.StdOut);
+            Assert.Contains("- sequencia-sessao:", result.StdOut);
+            Assert.Contains($"- arquivo-auditoria: {expectedAuditPath}", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WhenAuditAppenderFails_ReturnsSuccessAndKeepsPatchResult()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(targetFilePath, "linha 1\nlinha 2");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("edit", "src/Program.cs", "linha 1\nlinha 2 atualizada", null)));
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMainWithWorkspacePatchAudit(
+                static _ => throw new IOException("falha ao persistir auditoria"),
+                "patch",
+                patchFilePath);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Equal("linha 1\nlinha 2 atualizada", File.ReadAllText(targetFilePath));
+            Assert.Contains(
+                "[ERROR] Nao foi possivel registrar a trilha de auditoria local do patch. falha ao persistir auditoria",
+                result.StdErr);
+            Assert.DoesNotContain("- arquivo-auditoria:", result.StdOut);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithUnknownOption_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("patch", "--foo", "patch.json");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. A opcao '--foo' nao e reconhecida no comando 'patch'.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun patch --dry-run patch.json.", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithDeleteChangeAndRejectedConfirmation_ReturnsCancelled_AndKeepsFile()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(targetFilePath, "linha para excluir");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("delete", "src/Program.cs", null, null)));
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMainWithInput("nao\n", "patch", patchFilePath);
+
+            Assert.Equal((int)CliExitCode.Cancelled, result.ExitCode);
+            Assert.True(File.Exists(targetFilePath));
+            Assert.Contains("ATENCAO: O patch contem operacoes destrutivas.", result.StdOut);
+            Assert.Contains("- delete: src/Program.cs", result.StdOut);
+            Assert.Contains("Confirme com 'sim' para aplicar as alteracoes destrutivas [sim/nao]: ", result.StdOut);
+            Assert.Contains(
+                "[ERROR] Estado de execucao: erro. Patch cancelado pelo usuario para evitar operacoes destrutivas.",
+                result.StdErr);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithDeleteChangeAndApprovedConfirmation_ReturnsSuccess_AndDeletesFile()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(targetFilePath, "linha para excluir");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("delete", "src/Program.cs", null, null)));
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMainWithInput("sim\n", "patch", patchFilePath);
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.False(File.Exists(targetFilePath));
+            Assert.Contains("ATENCAO: O patch contem operacoes destrutivas.", result.StdOut);
+            Assert.Contains("- delete: src/Program.cs", result.StdOut);
+            Assert.Contains("Confirme com 'sim' para aplicar as alteracoes destrutivas [sim/nao]: ", result.StdOut);
+            Assert.Contains("--- a/src/Program.cs", result.StdOut);
+            Assert.Contains("+++ /dev/null", result.StdOut);
+            Assert.Contains("- alteracoes-aplicadas: 1", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
     }
 
     [Fact]
@@ -1576,6 +1848,34 @@ public sealed class ProgramMainTests
             args);
     }
 
+    private static ExecutionResult ExecuteMainWithWorkspacePatchAudit(
+        Func<WorkspacePatchAuditEntry, string> workspacePatchAuditAppender,
+        params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+
+        using var stdOutWriter = new StringWriter();
+        using var stdErrWriter = new StringWriter();
+
+        Console.SetOut(stdOutWriter);
+        Console.SetError(stdErrWriter);
+
+        try
+        {
+            var exitCode = Program.RunForTests(args, workspacePatchAuditAppender);
+            return new ExecutionResult(
+                ExitCode: exitCode,
+                StdOut: stdOutWriter.ToString(),
+                StdErr: stdErrWriter.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+    }
+
     private static ExecutionResult ExecuteMainWithHistory(
         Func<IReadOnlyList<PromptHistoryEntry>> historyLoader,
         params string[] args)
@@ -1869,5 +2169,24 @@ public sealed class ProgramMainTests
               {instruction}
             ---
             """;
+    }
+
+    private static string BuildPatchRequestFileContent(
+        params (string Kind, string Path, string? Content, string? ExpectedContent)[] changes)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["changes"] = changes
+                .Select(static change => new Dictionary<string, object?>
+                {
+                    ["kind"] = change.Kind,
+                    ["path"] = change.Path,
+                    ["content"] = change.Content,
+                    ["expectedContent"] = change.ExpectedContent
+                })
+                .ToArray()
+        };
+
+        return JsonSerializer.Serialize(payload);
     }
 }

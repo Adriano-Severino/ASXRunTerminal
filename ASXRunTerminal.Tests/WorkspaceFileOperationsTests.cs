@@ -179,6 +179,32 @@ public sealed class WorkspaceFileOperationsTests
     }
 
     [Fact]
+    public void Move_WhenDirectoryOverwriteConfirmationIsRejected_Throws_AndKeepsDirectories()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "src/nested/file.txt", "origem");
+        CreateFile(root, "dest/legacy.txt", "destino");
+        WorkspaceDestructiveOperation? receivedOperation = null;
+        var operations = new WorkspaceFileOperations(
+            root,
+            operation =>
+            {
+                receivedOperation = operation;
+                return false;
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => operations.Move("src", "dest", overwrite: true));
+
+        Assert.Contains("Operacao destrutiva cancelada", exception.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(Path.Combine(root, "src")));
+        Assert.True(File.Exists(Path.Combine(root, "dest", "legacy.txt")));
+        Assert.True(receivedOperation.HasValue);
+        Assert.Equal(WorkspaceDestructiveOperationKind.MoveOverwriteDirectory, receivedOperation.Value.Kind);
+        Assert.True(receivedOperation.Value.IsRecursive);
+    }
+
+    [Fact]
     public void Delete_WhenPathIsFile_DeletesFile()
     {
         var root = CreateTemporaryDirectory();
@@ -188,6 +214,55 @@ public sealed class WorkspaceFileOperationsTests
         operations.Delete("tmp/delete-me.txt");
 
         Assert.False(File.Exists(Path.Combine(root, "tmp", "delete-me.txt")));
+    }
+
+    [Fact]
+    public void Delete_WhenConfirmationIsRejected_Throws_AndKeepsFile()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "tmp/delete-me.txt", "bye");
+        WorkspaceDestructiveOperation? receivedOperation = null;
+        var operations = new WorkspaceFileOperations(
+            root,
+            operation =>
+            {
+                receivedOperation = operation;
+                return false;
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => operations.Delete("tmp/delete-me.txt"));
+
+        Assert.Contains("Operacao destrutiva cancelada", exception.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(root, "tmp", "delete-me.txt")));
+        Assert.True(receivedOperation.HasValue);
+        Assert.Equal(WorkspaceDestructiveOperationKind.Delete, receivedOperation.Value.Kind);
+        Assert.False(receivedOperation.Value.IsRecursive);
+    }
+
+    [Fact]
+    public void Delete_WhenRecursiveDirectoryConfirmationIsRejected_Throws_AndKeepsDirectory()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "tmp/nested/file.txt", "bye");
+        WorkspaceDestructiveOperation? receivedOperation = null;
+        var operations = new WorkspaceFileOperations(
+            root,
+            operation =>
+            {
+                receivedOperation = operation;
+                return false;
+            });
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => operations.Delete("tmp", recursive: true));
+
+        Assert.Contains("Operacao destrutiva cancelada", exception.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(Path.Combine(root, "tmp")));
+        Assert.True(File.Exists(Path.Combine(root, "tmp", "nested", "file.txt")));
+        Assert.True(receivedOperation.HasValue);
+        Assert.Equal(WorkspaceDestructiveOperationKind.Delete, receivedOperation.Value.Kind);
+        Assert.True(receivedOperation.Value.IsRecursive);
     }
 
     [Fact]

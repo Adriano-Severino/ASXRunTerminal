@@ -20,6 +20,7 @@ Funcionalidades ja disponiveis:
 - `doctor`: valida disponibilidade do Ollama;
 - `models`: lista modelos locais do Ollama;
 - `context`: inspeciona resumo do workspace atual;
+- `patch`: aplica mudancas de arquivo por JSON e exibe diff unificado (com suporte a `--dry-run`);
 - `history`: mostra e limpa historico local;
 - `mcp list/add/remove/test`: gerencia servidores MCP locais/remotos;
 - `config get/set`: le e atualiza configuracao do usuario;
@@ -149,6 +150,35 @@ asxrun models
 asxrun context
 ```
 
+### Aplicar patch de arquivos com diff
+
+```bash
+asxrun patch patch.json
+```
+
+Para mudancas destrutivas (`delete`), o CLI pede confirmacao explicita antes de aplicar.
+Cada execucao do comando `patch` gera um registro de auditoria local com `sessionId`, sequencia na sessao e diff aplicado/simulado.
+
+### Simular patch sem alterar arquivos (`--dry-run`)
+
+```bash
+asxrun patch --dry-run patch.json
+```
+
+Exemplo de `patch.json`:
+
+```json
+{
+  "changes": [
+    {
+      "kind": "edit",
+      "path": "src/Program.cs",
+      "content": "linha 1\nlinha 2 atualizada"
+    }
+  ]
+}
+```
+
 ### Prompt unico
 
 ```bash
@@ -203,8 +233,8 @@ asxrun ask "Resumo do arquivo Program.cs"
 
 Arquivos locais criados automaticamente:
 
-- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history` e `%USERPROFILE%\\.asxrun\\mcp-servers.json`
-- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history` e `~/.asxrun/mcp-servers.json`
+- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history`, `%USERPROFILE%\\.asxrun\\mcp-servers.json` e `%USERPROFILE%\\.asxrun\\patch-audit`
+- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history`, `~/.asxrun/mcp-servers.json` e `~/.asxrun/patch-audit`
 
 Chaves suportadas:
 

@@ -27,6 +27,7 @@ internal static class Program
         "doctor",
         "models",
         "context",
+        "patch",
         "history",
         "config",
         "mcp",
@@ -36,6 +37,7 @@ internal static class Program
     private static readonly string[] CliOptionSuggestions =
     [
         "--model",
+        "--dry-run",
         "--help",
         "--version",
         "--clear"
@@ -64,9 +66,15 @@ internal static class Program
     private static readonly Func<CancellationTokenSource, Action, IDisposable> DefaultCancelSignalRegistration =
         static (cancellationTokenSource, onCancellationRequested) =>
             RegisterConsoleCancelHandler(cancellationTokenSource, onCancellationRequested);
+    private static readonly Func<WorkspacePatchAuditEntry, string> DefaultWorkspacePatchAuditAppender =
+        static entry => WorkspacePatchAuditFile.Append(entry);
     private static readonly Action DefaultUserConfigInitializer =
         static () => _ = UserConfigFile.EnsureExists();
     private static readonly Action NoOpUserConfigInitializer = static () => { };
+    private static readonly Func<WorkspacePatchAuditEntry, string> NoOpWorkspacePatchAuditAppender =
+        static _ => string.Empty;
+    private static readonly string CurrentExecutionSessionId = Guid.NewGuid().ToString("N");
+    private static long _workspacePatchAuditSequence;
 
     public static int Main(string[] args)
     {
@@ -77,7 +85,8 @@ internal static class Program
             DefaultModelsExecutor,
             DefaultCancelSignalRegistration,
             DefaultUserConfigInitializer,
-            applyConfiguredTheme: true);
+            applyConfiguredTheme: true,
+            workspacePatchAuditAppender: DefaultWorkspacePatchAuditAppender);
     }
 
     internal static int RunForTests(string[] args)
@@ -300,6 +309,22 @@ internal static class Program
             mcpServerTester: mcpServerTester ?? DefaultMcpServerTester);
     }
 
+    internal static int RunForTests(
+        string[] args,
+        Func<WorkspacePatchAuditEntry, string> workspacePatchAuditAppender)
+    {
+        ArgumentNullException.ThrowIfNull(workspacePatchAuditAppender);
+
+        return Run(
+            args,
+            DefaultPromptExecutor,
+            DefaultHealthcheckExecutor,
+            DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer,
+            workspacePatchAuditAppender: workspacePatchAuditAppender);
+    }
+
     private static int Run(
         string[] args,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
@@ -314,7 +339,8 @@ internal static class Program
         Action? historyClearer = null,
         Func<IReadOnlyList<McpServerDefinition>>? mcpServersLoader = null,
         Action<IReadOnlyList<McpServerDefinition>>? mcpServersSaver = null,
-        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null)
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null,
+        Func<WorkspacePatchAuditEntry, string>? workspacePatchAuditAppender = null)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(healthcheckExecutor);
@@ -329,6 +355,7 @@ internal static class Program
         mcpServersLoader ??= DefaultMcpServersLoader;
         mcpServersSaver ??= DefaultMcpServersSaver;
         mcpServerTester ??= DefaultMcpServerTester;
+        workspacePatchAuditAppender ??= NoOpWorkspacePatchAuditAppender;
 
         try
         {
@@ -394,6 +421,14 @@ internal static class Program
             if (parseResult.RunContext)
             {
                 return ExecuteContext();
+            }
+
+            if (parseResult.PatchRequestFilePath is string patchRequestFilePath)
+            {
+                return ExecutePatch(
+                    patchRequestFilePath,
+                    parseResult.PatchDryRun,
+                    workspacePatchAuditAppender);
             }
 
             if (parseResult.RunHistory)
@@ -559,6 +594,11 @@ internal static class Program
         if (args.Length > 0 && string.Equals(args[0], "context", StringComparison.OrdinalIgnoreCase))
         {
             return ParseContextArguments(args);
+        }
+
+        if (args.Length > 0 && string.Equals(args[0], "patch", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParsePatchArguments(args);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "config", StringComparison.OrdinalIgnoreCase))
@@ -782,6 +822,97 @@ internal static class Program
             Error: CliFriendlyError.InvalidArguments(
                 detail: "O comando 'context' nao aceita argumentos adicionais.",
                 suggestion: $"Exemplo: {CliName} context."));
+    }
+
+    private static ParseResult ParsePatchArguments(string[] args)
+    {
+        var dryRun = false;
+        string? patchRequestFilePath = null;
+
+        for (var index = 1; index < args.Length; index++)
+        {
+            var argument = args[index];
+
+            if (string.Equals(argument, "--dry-run", StringComparison.OrdinalIgnoreCase))
+            {
+                if (dryRun)
+                {
+                    return new ParseResult(
+                        ShowHelp: false,
+                        ShowVersion: false,
+                        AskPrompt: null,
+                        StartChat: false,
+                        RunDoctor: false,
+                        RunModels: false,
+                        SelectedModel: null,
+                        Error: CliFriendlyError.InvalidArguments(
+                            detail: "A opcao '--dry-run' foi informada mais de uma vez no comando 'patch'.",
+                            suggestion: $"Exemplo: {CliName} patch --dry-run patch.json."));
+                }
+
+                dryRun = true;
+                continue;
+            }
+
+            if (argument.StartsWith("-", StringComparison.Ordinal))
+            {
+                return new ParseResult(
+                    ShowHelp: false,
+                    ShowVersion: false,
+                    AskPrompt: null,
+                    StartChat: false,
+                    RunDoctor: false,
+                    RunModels: false,
+                    SelectedModel: null,
+                    Error: CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{argument}' nao e reconhecida no comando 'patch'.",
+                        suggestion: $"Exemplo: {CliName} patch --dry-run patch.json."));
+            }
+
+            if (patchRequestFilePath is not null)
+            {
+                return new ParseResult(
+                    ShowHelp: false,
+                    ShowVersion: false,
+                    AskPrompt: null,
+                    StartChat: false,
+                    RunDoctor: false,
+                    RunModels: false,
+                    SelectedModel: null,
+                    Error: CliFriendlyError.InvalidArguments(
+                        detail: "O comando 'patch' aceita apenas um arquivo JSON de requisicao.",
+                        suggestion: $"Exemplo: {CliName} patch patch.json."));
+            }
+
+            patchRequestFilePath = argument.Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(patchRequestFilePath))
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: CliFriendlyError.InvalidArguments(
+                    detail: "O comando 'patch' exige um arquivo JSON com a requisicao de mudancas.",
+                    suggestion: $"Exemplo: {CliName} patch --dry-run patch.json."));
+        }
+
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: null,
+            Error: null,
+            PatchRequestFilePath: patchRequestFilePath,
+            PatchDryRun: dryRun);
     }
 
     private static ParseResult ParseMcpArguments(string[] args)
@@ -1839,6 +1970,7 @@ internal static class Program
         Console.WriteLine($"  {CliName} doctor");
         Console.WriteLine($"  {CliName} models");
         Console.WriteLine($"  {CliName} context");
+        Console.WriteLine($"  {CliName} patch [--dry-run] <arquivo-json>");
         Console.WriteLine($"  {CliName} history [--clear]");
         Console.WriteLine($"  {CliName} mcp list");
         Console.WriteLine($"  {CliName} mcp add <nome> --command <cmd> [--arg <valor>]...");
@@ -1867,6 +1999,10 @@ internal static class Program
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
         Console.WriteLine("  models           Lista os modelos locais do Ollama.");
         Console.WriteLine("  context          Exibe resumo do workspace atual e do indice de contexto.");
+        Console.WriteLine("  patch            Aplica mudancas de arquivo via patch JSON e imprime diff unificado.");
+        Console.WriteLine("                   Use '--dry-run' para apenas visualizar o diff sem alterar arquivos.");
+        Console.WriteLine("                   Mudancas destrutivas (delete) exigem confirmacao explicita.");
+        Console.WriteLine("                   Cada execucao registra trilha de auditoria local por sessao.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
         Console.WriteLine("  mcp              Gerencia servidores MCP locais/remotos e executa teste de conectividade.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
@@ -2465,6 +2601,330 @@ internal static class Program
         Console.WriteLine($"- truncado: {(workspaceMap.IsTruncated ? "sim" : "nao")}");
 
         return (int)CliExitCode.Success;
+    }
+
+    private static int ExecutePatch(
+        string patchRequestFilePath,
+        bool dryRun,
+        Func<WorkspacePatchAuditEntry, string> workspacePatchAuditAppender)
+    {
+        ArgumentNullException.ThrowIfNull(workspacePatchAuditAppender);
+
+        ConsoleLogger.Info("Aplicando patch de workspace.");
+        WriteExecutionState(ExecutionState.Processing);
+
+        WorkspaceRootResolution workspaceRoot;
+        WorkspacePatchResult patchResult;
+        var resolvedPatchRequestFilePath = string.Empty;
+
+        try
+        {
+            workspaceRoot = WorkspaceRootDetector.Resolve();
+            resolvedPatchRequestFilePath = ResolvePatchRequestFilePath(patchRequestFilePath);
+            var patchRequest = LoadWorkspacePatchRequest(resolvedPatchRequestFilePath, dryRun);
+            var patchEngine = new WorkspacePatchEngine(workspaceRoot.DirectoryPath);
+
+            if (patchRequest.PreviewOnly)
+            {
+                patchResult = patchEngine.Apply(patchRequest);
+            }
+            else
+            {
+                var previewResult = patchEngine.Apply(patchRequest with { PreviewOnly = true });
+                if (!ConfirmDestructivePatchChangesIfRequired(previewResult))
+                {
+                    WriteExecutionState(
+                        ExecutionState.Error,
+                        "Patch cancelado pelo usuario para evitar operacoes destrutivas.");
+                    return (int)CliExitCode.Cancelled;
+                }
+
+                patchResult = patchEngine.Apply(patchRequest);
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or FileNotFoundException
+            or IOException
+            or JsonException
+            or UnauthorizedAccessException)
+        {
+            var error = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel aplicar o patch informado. {ex.Message}",
+                suggestion: $"Revise o arquivo JSON e tente novamente. Exemplo: {CliName} patch --dry-run patch.json.");
+            WriteFriendlyError(error);
+            return (int)error.ExitCode;
+        }
+
+        WriteExecutionState(ExecutionState.Diff, BuildPatchDiffStateDetail(patchResult));
+
+        if (string.IsNullOrWhiteSpace(patchResult.UnifiedDiff))
+        {
+            Console.WriteLine("# Nenhuma diferenca para exibir.");
+        }
+        else
+        {
+            Console.WriteLine(patchResult.UnifiedDiff);
+        }
+
+        WriteExecutionState(ExecutionState.Completed, BuildPatchCompletedStateDetail(patchResult));
+        Console.WriteLine($"- raiz-workspace: {workspaceRoot.DirectoryPath}");
+        Console.WriteLine($"- modo-dry-run: {(patchResult.IsPreviewOnly ? "sim" : "nao")}");
+        Console.WriteLine($"- alteracoes-planejadas: {patchResult.PlannedChangeCount}");
+        Console.WriteLine($"- alteracoes-aplicadas: {patchResult.AppliedChangeCount}");
+        Console.WriteLine($"- alteracoes-ignoradas: {patchResult.SkippedChangeCount}");
+
+        var auditEntry = BuildWorkspacePatchAuditEntry(
+            workspaceRoot.DirectoryPath,
+            resolvedPatchRequestFilePath,
+            patchResult);
+        var auditPath = TryAppendWorkspacePatchAuditEntry(auditEntry, workspacePatchAuditAppender);
+
+        Console.WriteLine($"- sessao-auditoria: {auditEntry.SessionId}");
+        Console.WriteLine($"- sequencia-sessao: {auditEntry.SessionSequence}");
+
+        if (!string.IsNullOrWhiteSpace(auditPath))
+        {
+            Console.WriteLine($"- arquivo-auditoria: {auditPath}");
+        }
+
+        return (int)CliExitCode.Success;
+    }
+
+    private static bool ConfirmDestructivePatchChangesIfRequired(WorkspacePatchResult previewResult)
+    {
+        var destructiveChanges = previewResult.Files
+            .Where(static fileResult => fileResult.HasChanges && fileResult.Kind == WorkspacePatchChangeKind.Delete)
+            .ToArray();
+
+        if (destructiveChanges.Length == 0)
+        {
+            return true;
+        }
+
+        Console.WriteLine("ATENCAO: O patch contem operacoes destrutivas.");
+        foreach (var destructiveChange in destructiveChanges)
+        {
+            Console.WriteLine($"- delete: {destructiveChange.Path}");
+        }
+
+        while (true)
+        {
+            Console.Write("Confirme com 'sim' para aplicar as alteracoes destrutivas [sim/nao]: ");
+            var confirmationInput = Console.ReadLine();
+
+            if (IsAffirmativeConfirmation(confirmationInput))
+            {
+                return true;
+            }
+
+            if (confirmationInput is null || IsNegativeConfirmation(confirmationInput))
+            {
+                return false;
+            }
+
+            Console.WriteLine("Resposta invalida. Digite 'sim' para confirmar ou 'nao' para cancelar.");
+        }
+    }
+
+    private static bool IsAffirmativeConfirmation(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalizedValue = value.Trim();
+        return string.Equals(normalizedValue, "sim", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalizedValue, "s", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalizedValue, "yes", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalizedValue, "y", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsNegativeConfirmation(string value)
+    {
+        var normalizedValue = value.Trim();
+        return string.Equals(normalizedValue, "nao", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalizedValue, "n", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(normalizedValue, "no", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static WorkspacePatchRequest LoadWorkspacePatchRequest(string patchRequestFilePath, bool dryRun)
+    {
+        if (!File.Exists(patchRequestFilePath))
+        {
+            throw new FileNotFoundException(
+                $"O arquivo de patch '{patchRequestFilePath}' nao foi encontrado.",
+                patchRequestFilePath);
+        }
+
+        var patchJson = File.ReadAllText(patchRequestFilePath);
+        WorkspacePatchRequestDocument? patchRequestDocument;
+
+        try
+        {
+            patchRequestDocument = JsonSerializer.Deserialize<WorkspacePatchRequestDocument>(
+                patchJson,
+                new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+        }
+        catch (JsonException ex)
+        {
+            throw new JsonException(
+                $"O arquivo de patch '{patchRequestFilePath}' nao contem JSON valido.",
+                ex);
+        }
+
+        var changes = BuildWorkspacePatchChanges(patchRequestDocument?.Changes);
+        return new WorkspacePatchRequest(
+            Changes: changes,
+            PreviewOnly: dryRun);
+    }
+
+    private static IReadOnlyList<WorkspacePatchChange> BuildWorkspacePatchChanges(
+        IReadOnlyList<WorkspacePatchChangeDocument>? changeDocuments)
+    {
+        if (changeDocuments is null || changeDocuments.Count == 0)
+        {
+            throw new InvalidOperationException(
+                "O arquivo de patch deve conter ao menos uma mudanca em 'changes'.");
+        }
+
+        var changes = new WorkspacePatchChange[changeDocuments.Count];
+
+        for (var index = 0; index < changeDocuments.Count; index++)
+        {
+            var changeDocument = changeDocuments[index]
+                ?? throw new InvalidOperationException(
+                    $"A mudanca na posicao {index + 1} do patch e invalida.");
+
+            if (!TryParseWorkspacePatchChangeKind(changeDocument.Kind, out var changeKind))
+            {
+                throw new InvalidOperationException(
+                    $"A mudanca na posicao {index + 1} possui tipo invalido '{changeDocument.Kind}'. Use 'create', 'edit' ou 'delete'.");
+            }
+
+            var changePath = changeDocument.Path?.Trim();
+            if (string.IsNullOrWhiteSpace(changePath))
+            {
+                throw new InvalidOperationException(
+                    $"A mudanca na posicao {index + 1} precisa informar o campo 'path'.");
+            }
+
+            changes[index] = new WorkspacePatchChange(
+                Kind: changeKind,
+                Path: changePath,
+                Content: changeDocument.Content,
+                ExpectedContent: changeDocument.ExpectedContent);
+        }
+
+        return changes;
+    }
+
+    private static bool TryParseWorkspacePatchChangeKind(string? rawKind, out WorkspacePatchChangeKind changeKind)
+    {
+        if (string.Equals(rawKind, "create", StringComparison.OrdinalIgnoreCase))
+        {
+            changeKind = WorkspacePatchChangeKind.Create;
+            return true;
+        }
+
+        if (string.Equals(rawKind, "edit", StringComparison.OrdinalIgnoreCase))
+        {
+            changeKind = WorkspacePatchChangeKind.Edit;
+            return true;
+        }
+
+        if (string.Equals(rawKind, "delete", StringComparison.OrdinalIgnoreCase))
+        {
+            changeKind = WorkspacePatchChangeKind.Delete;
+            return true;
+        }
+
+        changeKind = default;
+        return false;
+    }
+
+    private static string ResolvePatchRequestFilePath(string patchRequestFilePath)
+    {
+        if (string.IsNullOrWhiteSpace(patchRequestFilePath))
+        {
+            throw new ArgumentException(
+                "O caminho do arquivo de patch e obrigatorio.",
+                nameof(patchRequestFilePath));
+        }
+
+        var trimmedPath = patchRequestFilePath.Trim();
+        var candidatePath = Path.IsPathRooted(trimmedPath)
+            ? trimmedPath
+            : Path.Combine(Directory.GetCurrentDirectory(), trimmedPath);
+        return Path.GetFullPath(candidatePath);
+    }
+
+    private static string BuildPatchDiffStateDetail(WorkspacePatchResult patchResult)
+    {
+        if (!patchResult.HasChanges)
+        {
+            return "Nenhuma diferenca detectada para o patch informado.";
+        }
+
+        return patchResult.IsPreviewOnly
+            ? "Modo --dry-run habilitado. Diff gerado sem alterar arquivos."
+            : "Diff gerado para alteracoes aplicadas no workspace.";
+    }
+
+    private static string BuildPatchCompletedStateDetail(WorkspacePatchResult patchResult)
+    {
+        if (!patchResult.HasChanges)
+        {
+            return "Patch processado sem alteracoes efetivas.";
+        }
+
+        return patchResult.IsPreviewOnly
+            ? $"Patch simulado com {patchResult.PlannedChangeCount} alteracao(oes)."
+            : $"{patchResult.AppliedChangeCount} alteracao(oes) aplicada(s) no workspace.";
+    }
+
+    private static WorkspacePatchAuditEntry BuildWorkspacePatchAuditEntry(
+        string workspaceRootDirectoryPath,
+        string patchRequestFilePath,
+        WorkspacePatchResult patchResult)
+    {
+        return WorkspacePatchAuditEntry.FromPatchResult(
+            sessionId: CurrentExecutionSessionId,
+            sessionSequence: Interlocked.Increment(ref _workspacePatchAuditSequence),
+            workspaceRootDirectory: workspaceRootDirectoryPath,
+            patchRequestFilePath: patchRequestFilePath,
+            patchResult: patchResult);
+    }
+
+    private static string? TryAppendWorkspacePatchAuditEntry(
+        WorkspacePatchAuditEntry auditEntry,
+        Func<WorkspacePatchAuditEntry, string> workspacePatchAuditAppender)
+    {
+        ArgumentNullException.ThrowIfNull(workspacePatchAuditAppender);
+
+        try
+        {
+            var auditPath = workspacePatchAuditAppender(auditEntry);
+            return string.IsNullOrWhiteSpace(auditPath)
+                ? null
+                : auditPath.Trim();
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or IOException
+            or JsonException
+            or UnauthorizedAccessException)
+        {
+            ConsoleLogger.Error(
+                $"Nao foi possivel registrar a trilha de auditoria local do patch. {ex.Message}");
+            return null;
+        }
     }
 
     private static string GetWorkspaceRootKindLabel(WorkspaceRootKind rootKind)
@@ -3329,6 +3789,22 @@ internal static class Program
         int CharacterCount,
         bool ContainsDiffMarkers);
 
+    private sealed class WorkspacePatchRequestDocument
+    {
+        public WorkspacePatchChangeDocument[]? Changes { get; init; }
+    }
+
+    private sealed class WorkspacePatchChangeDocument
+    {
+        public string? Kind { get; init; }
+
+        public string? Path { get; init; }
+
+        public string? Content { get; init; }
+
+        public string? ExpectedContent { get; init; }
+    }
+
     private readonly record struct ParseResult(
         bool ShowHelp,
         bool ShowVersion,
@@ -3353,5 +3829,7 @@ internal static class Program
         string? ShowSkillName = null,
         string? RunSkillName = null,
         string? SkillPrompt = null,
-        bool RunContext = false);
+        bool RunContext = false,
+        string? PatchRequestFilePath = null,
+        bool PatchDryRun = false);
 }
