@@ -92,4 +92,34 @@ public sealed class SkillCatalogDiscoveryDirectoriesTests
         var onlyDirectory = Assert.Single(discoveredDirectories);
         Assert.Equal(expectedDirectory, onlyDirectory);
     }
+
+    [Fact]
+    public void GetDiscoveryDirectories_UsesDetectedWorkspaceRoot_ForLocalSkillsDirectory()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "asxrun-skill-discovery-tests",
+            Guid.NewGuid().ToString("N"));
+        var solutionDirectory = Path.Combine(root, "src", "Backend");
+        var nestedCurrentDirectory = Path.Combine(solutionDirectory, "Api", "Controllers");
+        var userHomeDirectory = Path.Combine(root, "home");
+
+        Directory.CreateDirectory(nestedCurrentDirectory);
+        Directory.CreateDirectory(userHomeDirectory);
+        Directory.CreateDirectory(Path.Combine(root, ".git"));
+        File.WriteAllText(Path.Combine(solutionDirectory, "backend.sln"), string.Empty);
+
+        var discoveredDirectories = SkillCatalog.GetDiscoveryDirectories(
+            currentDirectoryResolver: () => nestedCurrentDirectory,
+            userHomeResolver: () => userHomeDirectory);
+
+        var expectedLocalDirectory = Path.GetFullPath(
+            Path.Combine(solutionDirectory, ".asxrun", "skills"));
+        var expectedUserDirectory = Path.GetFullPath(
+            Path.Combine(userHomeDirectory, ".asxrun", "skills"));
+
+        Assert.Equal(2, discoveredDirectories.Count);
+        Assert.Equal(expectedLocalDirectory, discoveredDirectories[0]);
+        Assert.Equal(expectedUserDirectory, discoveredDirectories[1]);
+    }
 }

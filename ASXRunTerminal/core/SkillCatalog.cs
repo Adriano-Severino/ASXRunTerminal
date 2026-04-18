@@ -96,9 +96,11 @@ internal static class SkillCatalog
         Func<string?>? userHomeResolver = null)
     {
         var currentDirectory = ResolveCurrentDirectory(currentDirectoryResolver);
+        var workspaceRoot = WorkspaceRootDetector.Resolve(
+            currentDirectoryResolver: () => currentDirectory);
         var userHomeDirectory = ResolveUserHome(userHomeResolver);
         var localSkillsDirectory = Path.GetFullPath(
-            Path.Combine(currentDirectory, ConfigDirectoryName, SkillsDirectoryName));
+            Path.Combine(workspaceRoot.DirectoryPath, ConfigDirectoryName, SkillsDirectoryName));
         var userSkillsDirectory = Path.GetFullPath(
             Path.Combine(userHomeDirectory, ConfigDirectoryName, SkillsDirectoryName));
 

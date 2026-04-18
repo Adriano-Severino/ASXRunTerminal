@@ -47,6 +47,7 @@ public sealed class ProgramMainTests
         Assert.Contains("asxrun chat", result.StdOut);
         Assert.Contains("asxrun doctor", result.StdOut);
         Assert.Contains("asxrun models", result.StdOut);
+        Assert.Contains("asxrun context", result.StdOut);
         Assert.Contains("asxrun history", result.StdOut);
         Assert.Contains("asxrun history [--clear]", result.StdOut);
         Assert.Contains("asxrun mcp list", result.StdOut);
@@ -594,6 +595,57 @@ public sealed class ProgramMainTests
         Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
         Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'models' nao aceita argumentos adicionais.", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun models.", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_ContextCommand_ReturnsSuccess_AndWritesWorkspaceSummary()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(nestedDirectory);
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            File.WriteAllText(Path.Combine(workspaceRootDirectory, "README.md"), "# workspace");
+            File.WriteAllText(Path.Combine(nestedDirectory, "Program.cs"), "internal static class Program { }");
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMain("context");
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Contains("[INFO] Inspecionando contexto do workspace atual.", result.StdOut);
+            Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+            Assert.Contains("[INFO] Estado de execucao: concluido. Resumo do workspace atual gerado.", result.StdOut);
+            Assert.Contains($"- raiz-workspace: {Path.GetFullPath(workspaceRootDirectory)}", result.StdOut);
+            Assert.Contains("- tipo-raiz: git", result.StdOut);
+            Assert.Contains("- entradas-indexadas:", result.StdOut);
+            Assert.Contains("- diretorios-mapeados:", result.StdOut);
+            Assert.Contains("- arquivos-mapeados:", result.StdOut);
+            Assert.Contains("- limite-aplicado:", result.StdOut);
+            Assert.Contains("- truncado: ", result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_ContextCommand_WithExtraArguments_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("context", "extra");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'context' nao aceita argumentos adicionais.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun context.", result.StdErr);
         Assert.Equal(string.Empty, result.StdOut);
     }
 

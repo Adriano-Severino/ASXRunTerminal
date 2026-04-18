@@ -19,6 +19,7 @@ Funcionalidades ja disponiveis:
 - `chat`: modo interativo no terminal;
 - `doctor`: valida disponibilidade do Ollama;
 - `models`: lista modelos locais do Ollama;
+- `context`: inspeciona resumo do workspace atual;
 - `history`: mostra e limpa historico local;
 - `mcp list/add/remove/test`: gerencia servidores MCP locais/remotos;
 - `config get/set`: le e atualiza configuracao do usuario;
@@ -140,6 +141,12 @@ asxrun doctor
 
 ```bash
 asxrun models
+```
+
+### Inspecionar contexto do workspace
+
+```bash
+asxrun context
 ```
 
 ### Prompt unico
@@ -283,6 +290,11 @@ Criar template de arquivo de skill no diretorio atual:
 ```bash
 asxrun skills init
 ```
+
+Observacao: a descoberta de skills locais usa `<raiz-do-projeto>/.asxrun/skills`.
+A raiz do projeto e detectada automaticamente por precedencia:
+`monorepo` (`pnpm-workspace.yaml`, `nx.json`, `package.json` com `workspaces`) >
+`solution/workspace` (`.sln`, `.slnx`, `.code-workspace`) > `git root` (`.git`).
 
 Executar prompt com skill:
 

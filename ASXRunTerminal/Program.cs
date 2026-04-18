@@ -26,6 +26,7 @@ internal static class Program
         "chat",
         "doctor",
         "models",
+        "context",
         "history",
         "config",
         "mcp",
@@ -390,6 +391,11 @@ internal static class Program
                 return ExecuteModels(modelsExecutor);
             }
 
+            if (parseResult.RunContext)
+            {
+                return ExecuteContext();
+            }
+
             if (parseResult.RunHistory)
             {
                 return ExecuteHistory(
@@ -548,6 +554,11 @@ internal static class Program
                 RunModels: true,
                 SelectedModel: null,
                 Error: null);
+        }
+
+        if (args.Length > 0 && string.Equals(args[0], "context", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseContextArguments(args);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "config", StringComparison.OrdinalIgnoreCase))
@@ -742,6 +753,35 @@ internal static class Program
             Error: CliFriendlyError.InvalidArguments(
                 detail: "O comando 'history' aceita apenas a opcao '--clear'.",
                 suggestion: $"Exemplos: {CliName} history | {CliName} history --clear."));
+    }
+
+    private static ParseResult ParseContextArguments(string[] args)
+    {
+        if (args.Length == 1)
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: null,
+                RunContext: true);
+        }
+
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: null,
+            Error: CliFriendlyError.InvalidArguments(
+                detail: "O comando 'context' nao aceita argumentos adicionais.",
+                suggestion: $"Exemplo: {CliName} context."));
     }
 
     private static ParseResult ParseMcpArguments(string[] args)
@@ -1798,6 +1838,7 @@ internal static class Program
         Console.WriteLine($"  {CliName} chat [--model <modelo>]");
         Console.WriteLine($"  {CliName} doctor");
         Console.WriteLine($"  {CliName} models");
+        Console.WriteLine($"  {CliName} context");
         Console.WriteLine($"  {CliName} history [--clear]");
         Console.WriteLine($"  {CliName} mcp list");
         Console.WriteLine($"  {CliName} mcp add <nome> --command <cmd> [--arg <valor>]...");
@@ -1825,6 +1866,7 @@ internal static class Program
         Console.WriteLine("                   Comandos no chat: /help, /clear, /models, /tools, /exit.");
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
         Console.WriteLine("  models           Lista os modelos locais do Ollama.");
+        Console.WriteLine("  context          Exibe resumo do workspace atual e do indice de contexto.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
         Console.WriteLine("  mcp              Gerencia servidores MCP locais/remotos e executa teste de conectividade.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
@@ -2374,6 +2416,78 @@ internal static class Program
         }
 
         return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteContext()
+    {
+        ConsoleLogger.Info("Inspecionando contexto do workspace atual.");
+        WriteExecutionState(ExecutionState.Processing);
+
+        WorkspaceRootResolution workspaceRoot;
+        WorkspaceContextFileIndex workspaceIndex;
+
+        try
+        {
+            workspaceRoot = WorkspaceRootDetector.Resolve();
+            workspaceIndex = WorkspaceContextFileIndexCatalog.GetOrCreate(workspaceRoot.DirectoryPath);
+            _ = workspaceIndex.Refresh();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or DirectoryNotFoundException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            var error = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel inspecionar o contexto do workspace atual. {ex.Message}",
+                suggestion: "Verifique se o diretorio atual e acessivel e tente novamente.");
+            WriteFriendlyError(error);
+            return (int)error.ExitCode;
+        }
+
+        var workspaceMap = workspaceIndex.CurrentMap;
+        var directoryEntries = workspaceMap.Entries.Count(static entry => entry.Kind == WorkspaceEntryKind.Directory);
+        var fileEntries = workspaceMap.Entries.Count(static entry => entry.Kind == WorkspaceEntryKind.File);
+
+        WriteExecutionState(
+            ExecutionState.Completed,
+            "Resumo do workspace atual gerado.");
+        Console.WriteLine($"- raiz-workspace: {workspaceRoot.DirectoryPath}");
+        Console.WriteLine($"- tipo-raiz: {GetWorkspaceRootKindLabel(workspaceRoot.Kind)}");
+        Console.WriteLine($"- versao-indice: {workspaceIndex.Version}");
+        Console.WriteLine($"- ultima-indexacao-utc: {workspaceIndex.LastIndexedAtUtc:yyyy-MM-dd HH:mm:ss}");
+        Console.WriteLine($"- entradas-indexadas: {workspaceIndex.EntryCount}");
+        Console.WriteLine($"- diretorios-mapeados: {directoryEntries}");
+        Console.WriteLine($"- arquivos-mapeados: {fileEntries}");
+        Console.WriteLine($"- diretorios-visitados: {workspaceMap.VisitedDirectoryCount}");
+        Console.WriteLine($"- arquivos-visitados: {workspaceMap.VisitedFileCount}");
+        Console.WriteLine($"- entradas-ignoradas: {workspaceMap.IgnoredEntryCount}");
+        Console.WriteLine($"- limite-aplicado: {GetWorkspaceMapLimitLabel(workspaceMap.LimitKind)}");
+        Console.WriteLine($"- truncado: {(workspaceMap.IsTruncated ? "sim" : "nao")}");
+
+        return (int)CliExitCode.Success;
+    }
+
+    private static string GetWorkspaceRootKindLabel(WorkspaceRootKind rootKind)
+    {
+        return rootKind switch
+        {
+            WorkspaceRootKind.Monorepo => "monorepo",
+            WorkspaceRootKind.SolutionOrWorkspace => "solution/workspace",
+            WorkspaceRootKind.Git => "git",
+            WorkspaceRootKind.CurrentDirectory => "diretorio-atual",
+            _ => "desconhecido"
+        };
+    }
+
+    private static string GetWorkspaceMapLimitLabel(WorkspaceMapLimitKind limitKind)
+    {
+        return limitKind switch
+        {
+            WorkspaceMapLimitKind.None => "none",
+            WorkspaceMapLimitKind.MaxEntries => "max-entries",
+            WorkspaceMapLimitKind.MaxDepth => "max-depth",
+            _ => "desconhecido"
+        };
     }
 
     private static int ExecuteHistory(
@@ -3238,5 +3352,6 @@ internal static class Program
         bool RunSkillsInit = false,
         string? ShowSkillName = null,
         string? RunSkillName = null,
-        string? SkillPrompt = null);
+        string? SkillPrompt = null,
+        bool RunContext = false);
 }
