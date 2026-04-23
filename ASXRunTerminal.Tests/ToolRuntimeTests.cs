@@ -400,6 +400,77 @@ public sealed class ToolRuntimeTests
     }
 
     [Fact]
+    public async Task ToolRuntime_ExecuteAsync_FallsBackToNextProvider_WhenFirstToolIsUnavailable()
+    {
+        var firstProviderCalls = 0;
+        var secondProviderCalls = 0;
+        var runtime = new ToolRuntime(
+            new StubToolProvider(
+                "stub-tool",
+                execute: (_, _) =>
+                {
+                    firstProviderCalls++;
+                    return ToolExecutionResult.Failure(
+                        error: "Ferramenta indisponivel.",
+                        exitCode: 127,
+                        duration: TimeSpan.Zero);
+                }),
+            new StubToolProvider(
+                "stub-tool",
+                execute: (request, _) =>
+                {
+                    secondProviderCalls++;
+                    request.Arguments.TryGetValue("input", out var input);
+                    return ToolExecutionResult.Success($"fallback:{input}", TimeSpan.Zero);
+                }));
+        var request = new ToolExecutionRequest(
+            "stub-tool",
+            new Dictionary<string, string> { ["input"] = "ok" });
+
+        var result = await runtime.ExecuteAsync(request);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("fallback:ok", result.Output);
+        Assert.Equal(1, firstProviderCalls);
+        Assert.Equal(1, secondProviderCalls);
+    }
+
+    [Fact]
+    public async Task ToolRuntime_ExecuteAsync_DoesNotFallback_WhenFailureIsNotUnavailable()
+    {
+        var firstProviderCalls = 0;
+        var secondProviderCalls = 0;
+        var runtime = new ToolRuntime(
+            new StubToolProvider(
+                "stub-tool",
+                execute: (_, _) =>
+                {
+                    firstProviderCalls++;
+                    return ToolExecutionResult.Failure(
+                        error: "Falha de execucao.",
+                        exitCode: 1,
+                        duration: TimeSpan.Zero);
+                }),
+            new StubToolProvider(
+                "stub-tool",
+                execute: (_, _) =>
+                {
+                    secondProviderCalls++;
+                    return ToolExecutionResult.Success("nao-deveria", TimeSpan.Zero);
+                }));
+        var request = new ToolExecutionRequest(
+            "stub-tool",
+            new Dictionary<string, string> { ["input"] = "ignored" });
+
+        var result = await runtime.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal(1, firstProviderCalls);
+        Assert.Equal(0, secondProviderCalls);
+    }
+
+    [Fact]
     public async Task ToolRuntime_ExecuteAsync_ForShellAlias_DispatchesToResolvedShellProvider()
     {
         var runtime = new ToolRuntime(
@@ -413,6 +484,45 @@ public sealed class ToolRuntimeTests
 
         Assert.True(result.IsSuccess);
         Assert.Equal("stub:resolved", result.Output);
+    }
+
+    [Fact]
+    public async Task ToolRuntime_ExecuteAsync_ForShellAlias_FallsBackWhenDefaultShellIsUnavailable()
+    {
+        var zshCalls = 0;
+        var bashCalls = 0;
+        var runtime = new ToolRuntime(
+            [
+                new StubToolProvider(
+                    "zsh",
+                    execute: (_, _) =>
+                    {
+                        zshCalls++;
+                        return ToolExecutionResult.Failure(
+                            error: "zsh indisponivel",
+                            exitCode: 127,
+                            duration: TimeSpan.Zero);
+                    }),
+                new StubToolProvider(
+                    "bash",
+                    execute: (request, _) =>
+                    {
+                        bashCalls++;
+                        request.Arguments.TryGetValue("input", out var input);
+                        return ToolExecutionResult.Success($"bash:{input}", TimeSpan.Zero);
+                    })
+            ],
+            defaultShellSelector: () => "zsh");
+        var request = new ToolExecutionRequest(
+            "shell",
+            new Dictionary<string, string> { ["input"] = "fallback" });
+
+        var result = await runtime.ExecuteAsync(request);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("bash:fallback", result.Output);
+        Assert.Equal(1, zshCalls);
+        Assert.Equal(1, bashCalls);
     }
 
     [Fact]
@@ -512,7 +622,9 @@ public sealed class ToolRuntimeTests
 
     // ── Stub provider for testing ──
 
-    private sealed class StubToolProvider(string toolName) : IToolProvider
+    private sealed class StubToolProvider(
+        string toolName,
+        Func<ToolExecutionRequest, CancellationToken, ToolExecutionResult>? execute = null) : IToolProvider
     {
         public string ProviderName => "stub";
 
@@ -538,9 +650,17 @@ public sealed class ToolRuntimeTests
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            var resolvedExecution = execute ?? DefaultExecution;
+            return Task.FromResult(resolvedExecution(request, cancellationToken));
+        }
+
+        private static ToolExecutionResult DefaultExecution(
+            ToolExecutionRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             request.Arguments.TryGetValue("input", out var input);
-            return Task.FromResult(
-                ToolExecutionResult.Success($"stub:{input}", TimeSpan.Zero));
+            return ToolExecutionResult.Success($"stub:{input}", TimeSpan.Zero);
         }
     }
 

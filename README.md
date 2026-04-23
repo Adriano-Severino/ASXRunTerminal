@@ -22,6 +22,7 @@ Funcionalidades ja disponiveis:
 - `context`: inspeciona resumo do workspace atual;
 - `patch`: aplica mudancas de arquivo por JSON e exibe diff unificado (com suporte a `--dry-run`);
 - `history`: mostra e limpa historico local;
+- `resume`: retoma a ultima sessao interrompida de `ask/skill` com checkpoints por etapa;
 - `mcp list/add/remove/test`: gerencia servidores MCP locais/remotos;
 - `config get/set`: le e atualiza configuracao do usuario;
 - `skills`, `skills show`, `skill`: skills padrao para tarefas tecnicas.
@@ -292,8 +293,8 @@ asxrun ask "Resumo do arquivo Program.cs"
 
 Arquivos locais criados automaticamente:
 
-- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history`, `%USERPROFILE%\\.asxrun\\mcp-servers.json` e `%USERPROFILE%\\.asxrun\\patch-audit`
-- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history`, `~/.asxrun/mcp-servers.json` e `~/.asxrun/patch-audit`
+- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history`, `%USERPROFILE%\\.asxrun\\mcp-servers.json`, `%USERPROFILE%\\.asxrun\\patch-audit` e `%USERPROFILE%\\.asxrun\\execution-checkpoints`
+- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history`, `~/.asxrun/mcp-servers.json`, `~/.asxrun/patch-audit` e `~/.asxrun/execution-checkpoints`
 
 Chaves suportadas:
 
@@ -326,6 +327,20 @@ Limpar historico:
 
 ```bash
 asxrun history --clear
+```
+
+## Retomada de Sessao
+
+Retomar a sessao interrompida mais recente de `ask/skill`:
+
+```bash
+asxrun resume
+```
+
+Retomar uma sessao especifica:
+
+```bash
+asxrun resume <session-id>
 ```
 
 ## MCP

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
@@ -151,6 +152,13 @@ internal sealed class UnixShellToolProvider : IToolProvider
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return ToolExecutionResult.Cancelled(TimeSpan.Zero);
+        }
+        catch (Win32Exception ex)
+        {
+            return ToolExecutionResult.Failure(
+                error: $"Ferramenta '{shellInterpreter}' indisponivel no ambiente atual: {ex.Message}",
+                exitCode: 127,
+                duration: TimeSpan.Zero);
         }
         catch (Exception ex)
         {

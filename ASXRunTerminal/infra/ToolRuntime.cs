@@ -10,6 +10,12 @@ internal sealed class ToolRuntime : IToolRuntime
         Name: "script",
         Description: "Script ou comando a ser executado no shell padrao.",
         IsRequired: true);
+    private static readonly string[] KnownShellToolNames =
+    [
+        "powershell",
+        "bash",
+        "zsh"
+    ];
 
     private readonly IReadOnlyList<IToolProvider> _providers;
     private readonly Func<string?> _defaultShellSelector;
@@ -79,8 +85,8 @@ internal sealed class ToolRuntime : IToolRuntime
                 duration: stopwatch.Elapsed);
         }
 
-        var requestToExecute = request;
-
+        var toolNamesToTry = new List<string>();
+        var knownToolNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (string.Equals(request.ToolName, "shell", StringComparison.OrdinalIgnoreCase))
         {
             var defaultShell = _defaultShellSelector();
@@ -93,16 +99,46 @@ internal sealed class ToolRuntime : IToolRuntime
                     duration: stopwatch.Elapsed);
             }
 
-            requestToExecute = request with { ToolName = defaultShell };
+            AddToolNameCandidate(defaultShell);
+            foreach (var fallbackShellName in GetShellFallbackToolNames())
+            {
+                AddToolNameCandidate(fallbackShellName);
+            }
+        }
+        else
+        {
+            AddToolNameCandidate(request.ToolName);
         }
 
-        foreach (var provider in _providers)
+        ToolExecutionResult? lastUnavailableResult = null;
+        var hasMatchingProvider = false;
+
+        foreach (var toolName in toolNamesToTry)
         {
-            if (provider.CanHandle(requestToExecute.ToolName))
+            var requestToExecute = request with { ToolName = toolName };
+            foreach (var provider in _providers)
             {
+                if (!provider.CanHandle(toolName))
+                {
+                    continue;
+                }
+
+                hasMatchingProvider = true;
+
                 try
                 {
-                    return await provider.ExecuteAsync(requestToExecute, cancellationToken);
+                    var result = await provider.ExecuteAsync(requestToExecute, cancellationToken);
+                    if (result.IsSuccess || result.IsTimedOut || result.IsCancelled)
+                    {
+                        return result;
+                    }
+
+                    if (!IsToolUnavailableResult(result))
+                    {
+                        return result;
+                    }
+
+                    lastUnavailableResult = result;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -119,10 +155,101 @@ internal sealed class ToolRuntime : IToolRuntime
             }
         }
 
+        if (lastUnavailableResult is ToolExecutionResult unavailableResult)
+        {
+            stopwatch.Stop();
+            return ToolExecutionResult.Failure(
+                error: unavailableResult.Error
+                    ?? $"A ferramenta '{request.ToolName}' esta indisponivel no momento.",
+                exitCode: unavailableResult.ExitCode == 0 ? 127 : unavailableResult.ExitCode,
+                duration: stopwatch.Elapsed,
+                stdOut: unavailableResult.StdOut);
+        }
+
+        if (hasMatchingProvider)
+        {
+            stopwatch.Stop();
+            return ToolExecutionResult.Failure(
+                error: $"A ferramenta '{request.ToolName}' falhou sem fallback disponivel.",
+                exitCode: 1,
+                duration: stopwatch.Elapsed);
+        }
+
         stopwatch.Stop();
         return ToolExecutionResult.Failure(
             error: $"Nenhum provider registrado consegue executar a ferramenta '{request.ToolName}'.",
             exitCode: 127,
             duration: stopwatch.Elapsed);
+
+        void AddToolNameCandidate(string? toolNameCandidate)
+        {
+            if (string.IsNullOrWhiteSpace(toolNameCandidate))
+            {
+                return;
+            }
+
+            var normalizedToolName = toolNameCandidate.Trim();
+            if (!knownToolNames.Add(normalizedToolName))
+            {
+                return;
+            }
+
+            toolNamesToTry.Add(normalizedToolName);
+        }
+    }
+
+    private IReadOnlyList<string> GetShellFallbackToolNames()
+    {
+        var fallbackShellNames = new List<string>();
+        var knownShellNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var provider in _providers)
+        {
+            foreach (var descriptor in provider.ListTools())
+            {
+                if (!IsShellToolName(descriptor.Name))
+                {
+                    continue;
+                }
+
+                var normalizedName = descriptor.Name.Trim();
+                if (!knownShellNames.Add(normalizedName))
+                {
+                    continue;
+                }
+
+                fallbackShellNames.Add(normalizedName);
+            }
+        }
+
+        return fallbackShellNames;
+    }
+
+    private static bool IsShellToolName(string? toolName)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return false;
+        }
+
+        foreach (var knownShellToolName in KnownShellToolNames)
+        {
+            if (string.Equals(toolName, knownShellToolName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsToolUnavailableResult(ToolExecutionResult result)
+    {
+        if (result.ExitCode == 127)
+        {
+            return true;
+        }
+
+        return false;
     }
 }

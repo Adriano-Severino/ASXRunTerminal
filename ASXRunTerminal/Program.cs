@@ -1,6 +1,7 @@
 using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using System.Net;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
@@ -33,6 +34,7 @@ internal static class Program
         "context",
         "patch",
         "history",
+        "resume",
         "config",
         "mcp",
         "skills",
@@ -72,11 +74,19 @@ internal static class Program
             RegisterConsoleCancelHandler(cancellationTokenSource, onCancellationRequested);
     private static readonly Func<WorkspacePatchAuditEntry, string> DefaultWorkspacePatchAuditAppender =
         static entry => WorkspacePatchAuditFile.Append(entry);
+    private static readonly Action<ExecutionSessionCheckpoint> DefaultExecutionCheckpointAppender =
+        static checkpoint => ExecutionCheckpointFile.Append(checkpoint);
+    private static readonly Func<IReadOnlyList<ExecutionSessionCheckpoint>> DefaultExecutionCheckpointLoader =
+        static () => ExecutionCheckpointFile.Load();
     private static readonly Action DefaultUserConfigInitializer =
         static () => _ = UserConfigFile.EnsureExists();
     private static readonly Action NoOpUserConfigInitializer = static () => { };
     private static readonly Func<WorkspacePatchAuditEntry, string> NoOpWorkspacePatchAuditAppender =
         static _ => string.Empty;
+    private static readonly Action<ExecutionSessionCheckpoint> NoOpExecutionCheckpointAppender =
+        static _ => { };
+    private static readonly Func<IReadOnlyList<ExecutionSessionCheckpoint>> NoOpExecutionCheckpointLoader =
+        static () => Array.Empty<ExecutionSessionCheckpoint>();
     private static readonly string CurrentExecutionSessionId = Guid.NewGuid().ToString("N");
     private static long _workspacePatchAuditSequence;
 
@@ -90,7 +100,9 @@ internal static class Program
             DefaultCancelSignalRegistration,
             DefaultUserConfigInitializer,
             applyConfiguredTheme: true,
-            workspacePatchAuditAppender: DefaultWorkspacePatchAuditAppender);
+            workspacePatchAuditAppender: DefaultWorkspacePatchAuditAppender,
+            executionCheckpointAppender: DefaultExecutionCheckpointAppender,
+            executionCheckpointLoader: DefaultExecutionCheckpointLoader);
     }
 
     internal static int RunForTests(string[] args)
@@ -150,6 +162,23 @@ internal static class Program
             promptExecutor,
             DefaultHealthcheckExecutor,
             DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer);
+    }
+
+    internal static int RunForTests(
+        string[] args,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(modelsExecutor);
+
+        return Run(
+            args,
+            promptExecutor,
+            DefaultHealthcheckExecutor,
+            modelsExecutor,
             DefaultCancelSignalRegistration,
             NoOpUserConfigInitializer);
     }
@@ -329,6 +358,27 @@ internal static class Program
             workspacePatchAuditAppender: workspacePatchAuditAppender);
     }
 
+    internal static int RunForTests(
+        string[] args,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+        ArgumentNullException.ThrowIfNull(executionCheckpointLoader);
+
+        return Run(
+            args,
+            promptExecutor,
+            DefaultHealthcheckExecutor,
+            DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer,
+            executionCheckpointAppender: executionCheckpointAppender,
+            executionCheckpointLoader: executionCheckpointLoader);
+    }
+
     private static int Run(
         string[] args,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
@@ -344,7 +394,9 @@ internal static class Program
         Func<IReadOnlyList<McpServerDefinition>>? mcpServersLoader = null,
         Action<IReadOnlyList<McpServerDefinition>>? mcpServersSaver = null,
         Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null,
-        Func<WorkspacePatchAuditEntry, string>? workspacePatchAuditAppender = null)
+        Func<WorkspacePatchAuditEntry, string>? workspacePatchAuditAppender = null,
+        Action<ExecutionSessionCheckpoint>? executionCheckpointAppender = null,
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>>? executionCheckpointLoader = null)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(healthcheckExecutor);
@@ -360,6 +412,8 @@ internal static class Program
         mcpServersSaver ??= DefaultMcpServersSaver;
         mcpServerTester ??= DefaultMcpServerTester;
         workspacePatchAuditAppender ??= NoOpWorkspacePatchAuditAppender;
+        executionCheckpointAppender ??= NoOpExecutionCheckpointAppender;
+        executionCheckpointLoader ??= NoOpExecutionCheckpointLoader;
         var promptResilience = new ResilienceState("Ollama/prompt");
         var healthcheckResilience = new ResilienceState("Ollama/healthcheck");
         var modelsResilience = new ResilienceState("Ollama/models");
@@ -369,6 +423,9 @@ internal static class Program
             healthcheckExecutor,
             healthcheckResilience);
         var resilientModelsExecutor = WrapModelsExecutorWithResilience(modelsExecutor, modelsResilience);
+        var fallbackPromptExecutor = WrapPromptExecutorWithModelFallback(
+            resilientPromptExecutor,
+            resilientModelsExecutor);
         var resilientMcpServerTester = WrapMcpServerTesterWithResilience(mcpServerTester, mcpResilience);
 
         try
@@ -402,20 +459,31 @@ internal static class Program
                 return (int)CliExitCode.Success;
             }
 
+            if (parseResult.RunResume)
+            {
+                return ExecuteResume(
+                    parseResult.ResumeSessionId,
+                    fallbackPromptExecutor,
+                    cancelSignalRegistration,
+                    executionCheckpointAppender,
+                    executionCheckpointLoader);
+            }
+
             if (parseResult.AskPrompt is not null)
             {
                 return ExecuteAsk(
                     parseResult.AskPrompt,
                     parseResult.SelectedModel,
-                    resilientPromptExecutor,
-                    cancelSignalRegistration);
+                    fallbackPromptExecutor,
+                    cancelSignalRegistration,
+                    executionCheckpointAppender);
             }
 
             if (parseResult.StartChat)
             {
                 return ExecuteChat(
                     parseResult.SelectedModel,
-                    resilientPromptExecutor,
+                    fallbackPromptExecutor,
                     resilientModelsExecutor,
                     toolRuntime,
                     cancelSignalRegistration,
@@ -522,8 +590,9 @@ internal static class Program
                     parseResult.RunSkillName,
                     parseResult.SkillPrompt,
                     parseResult.SelectedModel,
-                    resilientPromptExecutor,
-                    cancelSignalRegistration);
+                    fallbackPromptExecutor,
+                    cancelSignalRegistration,
+                    executionCheckpointAppender);
             }
 
             ConsoleLogger.Info("ASXRunTerminal CLI inicializado.");
@@ -623,6 +692,11 @@ internal static class Program
         if (args.Length > 0 && string.Equals(args[0], "history", StringComparison.OrdinalIgnoreCase))
         {
             return ParseHistoryArguments(args);
+        }
+
+        if (args.Length > 0 && string.Equals(args[0], "resume", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseResumeArguments(args);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "mcp", StringComparison.OrdinalIgnoreCase))
@@ -807,6 +881,66 @@ internal static class Program
             Error: CliFriendlyError.InvalidArguments(
                 detail: "O comando 'history' aceita apenas a opcao '--clear'.",
                 suggestion: $"Exemplos: {CliName} history | {CliName} history --clear."));
+    }
+
+    private static ParseResult ParseResumeArguments(string[] args)
+    {
+        if (args.Length == 1)
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: null,
+                RunResume: true);
+        }
+
+        if (args.Length == 2)
+        {
+            var sessionId = args[1].Trim();
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return new ParseResult(
+                    ShowHelp: false,
+                    ShowVersion: false,
+                    AskPrompt: null,
+                    StartChat: false,
+                    RunDoctor: false,
+                    RunModels: false,
+                    SelectedModel: null,
+                    Error: CliFriendlyError.InvalidArguments(
+                        detail: "O identificador de sessao informado para 'resume' esta vazio.",
+                        suggestion: $"Exemplo: {CliName} resume <session-id>."));
+            }
+
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: null,
+                RunResume: true,
+                ResumeSessionId: sessionId);
+        }
+
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: null,
+            Error: CliFriendlyError.InvalidArguments(
+                detail: "O comando 'resume' aceita no maximo um identificador de sessao.",
+                suggestion: $"Exemplos: {CliName} resume | {CliName} resume <session-id>."));
     }
 
     private static ParseResult ParseContextArguments(string[] args)
@@ -1986,6 +2120,7 @@ internal static class Program
         Console.WriteLine($"  {CliName} context");
         Console.WriteLine($"  {CliName} patch [--dry-run] <arquivo-json>");
         Console.WriteLine($"  {CliName} history [--clear]");
+        Console.WriteLine($"  {CliName} resume [<session-id>]");
         Console.WriteLine($"  {CliName} mcp list");
         Console.WriteLine($"  {CliName} mcp add <nome> --command <cmd> [--arg <valor>]...");
         Console.WriteLine($"  {CliName} mcp add <nome> --url <endpoint> [--transport http|sse]");
@@ -2018,6 +2153,8 @@ internal static class Program
         Console.WriteLine("                   Mudancas destrutivas (delete) exigem confirmacao explicita.");
         Console.WriteLine("                   Cada execucao registra trilha de auditoria local por sessao.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
+        Console.WriteLine("  resume           Retoma a ultima sessao interrompida de ask/skill.");
+        Console.WriteLine("                   Opcional: informe um session-id especifico para retomar.");
         Console.WriteLine("  mcp              Gerencia servidores MCP locais/remotos e executa teste de conectividade.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
         Console.WriteLine($"                   Chaves suportadas: {GetSupportedConfigKeysLabel()}.");
@@ -2044,13 +2181,176 @@ internal static class Program
         string prompt,
         string? model,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
-        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration)
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
     {
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+
         ConsoleLogger.Info("Executando comando unico 'ask'.");
-        var wasCancelled = ExecutePrompt(prompt, model, promptExecutor, cancelSignalRegistration);
+        var checkpointContext = CreatePromptCheckpointContext(
+            command: "ask",
+            prompt: prompt,
+            model: model,
+            skillName: null,
+            executionCheckpointAppender: executionCheckpointAppender);
+        var wasCancelled = ExecutePrompt(
+            prompt,
+            model,
+            promptExecutor,
+            cancelSignalRegistration,
+            checkpointContext);
         return wasCancelled
             ? (int)CliExitCode.Cancelled
             : (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteResume(
+        string? sessionId,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(cancelSignalRegistration);
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+        ArgumentNullException.ThrowIfNull(executionCheckpointLoader);
+
+        ConsoleLogger.Info("Buscando checkpoint de sessao interrompida.");
+
+        IReadOnlyList<ExecutionSessionCheckpoint> checkpoints;
+        try
+        {
+            checkpoints = executionCheckpointLoader();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or IOException
+            or UnauthorizedAccessException
+            or JsonException)
+        {
+            var loadError = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel carregar checkpoints locais de execucao. {ex.Message}",
+                suggestion: "Verifique o arquivo de checkpoints em ~/.asxrun e tente novamente.");
+            WriteFriendlyError(loadError);
+            return (int)loadError.ExitCode;
+        }
+
+        var latestCheckpoints = GetLatestCheckpointBySession(checkpoints);
+        var normalizedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? null
+            : sessionId.Trim();
+
+        ExecutionSessionCheckpoint? selectedCheckpoint = null;
+
+        if (normalizedSessionId is not null)
+        {
+            foreach (var checkpoint in latestCheckpoints)
+            {
+                if (!string.Equals(checkpoint.SessionId, normalizedSessionId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                selectedCheckpoint = checkpoint;
+                break;
+            }
+
+            if (selectedCheckpoint is null)
+            {
+                var notFoundError = CliFriendlyError.InvalidArguments(
+                    detail: $"Nenhum checkpoint foi encontrado para a sessao '{normalizedSessionId}'.",
+                    suggestion: $"Execute '{CliName} resume' para retomar a sessao interrompida mais recente.");
+                WriteFriendlyError(notFoundError);
+                return (int)notFoundError.ExitCode;
+            }
+        }
+        else
+        {
+            foreach (var checkpoint in latestCheckpoints)
+            {
+                if (!IsResumablePromptCheckpoint(checkpoint))
+                {
+                    continue;
+                }
+
+                selectedCheckpoint = checkpoint;
+                break;
+            }
+
+            if (selectedCheckpoint is null)
+            {
+                var missingError = CliFriendlyError.Runtime(
+                    detail: "Nenhuma sessao interrompida de ask/skill foi encontrada para retomar.",
+                    suggestion: $"Execute '{CliName} ask \"seu prompt\"' ou '{CliName} skill <nome> \"seu prompt\"' e use '{CliName} resume' se houver interrupcao.");
+                WriteFriendlyError(missingError);
+                return (int)missingError.ExitCode;
+            }
+        }
+
+        var checkpointToResume = selectedCheckpoint.Value;
+        if (!IsResumablePromptCheckpoint(checkpointToResume))
+        {
+            var notResumableError = CliFriendlyError.Runtime(
+                detail: $"A sessao '{checkpointToResume.SessionId}' nao esta interrompida ou nao pode ser retomada.",
+                suggestion: $"Use '{CliName} resume' sem argumentos para buscar outra sessao interrompida.");
+            WriteFriendlyError(notResumableError);
+            return (int)notResumableError.ExitCode;
+        }
+
+        ConsoleLogger.Info(
+            $"Retomando sessao '{checkpointToResume.SessionId}' do comando '{checkpointToResume.Command}' a partir da etapa '{checkpointToResume.Stage}'.");
+
+        if (string.Equals(checkpointToResume.Command, "ask", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExecuteAsk(
+                checkpointToResume.Prompt,
+                checkpointToResume.Model,
+                promptExecutor,
+                cancelSignalRegistration,
+                executionCheckpointAppender);
+        }
+
+        return ExecuteSkill(
+            checkpointToResume.SkillName!,
+            checkpointToResume.Prompt,
+            checkpointToResume.Model,
+            promptExecutor,
+            cancelSignalRegistration,
+            executionCheckpointAppender);
+    }
+
+    private static IReadOnlyList<ExecutionSessionCheckpoint> GetLatestCheckpointBySession(
+        IReadOnlyList<ExecutionSessionCheckpoint> checkpoints)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoints);
+
+        return checkpoints
+            .OrderByDescending(static checkpoint => checkpoint.TimestampUtc)
+            .GroupBy(static checkpoint => checkpoint.SessionId, StringComparer.OrdinalIgnoreCase)
+            .Select(static group => group.First())
+            .OrderByDescending(static checkpoint => checkpoint.TimestampUtc)
+            .ToArray();
+    }
+
+    private static bool IsResumablePromptCheckpoint(ExecutionSessionCheckpoint checkpoint)
+    {
+        if (checkpoint.Status == ExecutionCheckpointStatus.Completed)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(checkpoint.Prompt))
+        {
+            return false;
+        }
+
+        if (string.Equals(checkpoint.Command, "ask", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return string.Equals(checkpoint.Command, "skill", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(checkpoint.SkillName);
     }
 
     private static int ExecuteChat(
@@ -2476,7 +2776,8 @@ internal static class Program
         string prompt,
         string? model,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
-        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration)
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        PromptExecutionCheckpointContext? checkpointContext = null)
     {
         using var cancellationTokenSource = new CancellationTokenSource();
         using var cancelRegistration = cancelSignalRegistration(
@@ -2484,12 +2785,15 @@ internal static class Program
             static () => ConsoleLogger.Info(
                 "Cancelamento solicitado via Ctrl+C. Interrompendo prompt em execucao."));
 
-        WriteExecutionState(ExecutionState.Connecting);
-        WriteExecutionState(ExecutionState.ToolCall, "Encaminhando prompt para o runtime local.");
+        WriteExecutionStateAndCheckpoint(ExecutionState.Connecting, detail: null, checkpointContext);
+        WriteExecutionStateAndCheckpoint(
+            ExecutionState.ToolCall,
+            "Encaminhando prompt para o runtime local.",
+            checkpointContext);
 
         try
         {
-            WriteExecutionState(ExecutionState.Processing);
+            WriteExecutionStateAndCheckpoint(ExecutionState.Processing, detail: null, checkpointContext);
             var streamMetrics = StreamPromptResponseAsync(
                 prompt,
                 model,
@@ -2497,20 +2801,33 @@ internal static class Program
                 cancellationTokenSource.Token)
                 .GetAwaiter()
                 .GetResult();
-            WriteExecutionState(ExecutionState.Diff, BuildDiffStateDetail(streamMetrics));
-            WriteExecutionState(
+            WriteExecutionStateAndCheckpoint(
+                ExecutionState.Diff,
+                BuildDiffStateDetail(streamMetrics),
+                checkpointContext);
+            WriteExecutionStateAndCheckpoint(
                 ExecutionState.Completed,
-                $"Resposta finalizada com {streamMetrics.ChunkCount} bloco(s) de streaming.");
+                $"Resposta finalizada com {streamMetrics.ChunkCount} bloco(s) de streaming.",
+                checkpointContext,
+                ExecutionCheckpointStatus.Completed);
             return false;
         }
         catch (OperationCanceledException) when (cancellationTokenSource.IsCancellationRequested)
         {
-            WriteExecutionState(ExecutionState.Error, "Execucao cancelada pelo usuario.");
+            WriteExecutionStateAndCheckpoint(
+                ExecutionState.Error,
+                "Execucao cancelada pelo usuario.",
+                checkpointContext,
+                ExecutionCheckpointStatus.Cancelled);
             return true;
         }
         catch (Exception ex)
         {
-            WriteExecutionState(ExecutionState.Error, $"Nao foi possivel executar o prompt: {ex.Message}");
+            WriteExecutionStateAndCheckpoint(
+                ExecutionState.Error,
+                $"Nao foi possivel executar o prompt: {ex.Message}",
+                checkpointContext,
+                ExecutionCheckpointStatus.Failed);
             throw;
         }
     }
@@ -3350,8 +3667,11 @@ internal static class Program
         string prompt,
         string? model,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
-        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration)
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
     {
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+
         if (!SkillCatalog.TryFind(skillName, out var skill))
         {
             var error = CliFriendlyError.InvalidArguments(
@@ -3363,7 +3683,18 @@ internal static class Program
 
         ConsoleLogger.Info($"Executando skill '{skill.Name}'.");
         var promptWithSkill = BuildSkillPrompt(skill, prompt);
-        var wasCancelled = ExecutePrompt(promptWithSkill, model, promptExecutor, cancelSignalRegistration);
+        var checkpointContext = CreatePromptCheckpointContext(
+            command: "skill",
+            prompt: prompt,
+            model: model,
+            skillName: skill.Name,
+            executionCheckpointAppender: executionCheckpointAppender);
+        var wasCancelled = ExecutePrompt(
+            promptWithSkill,
+            model,
+            promptExecutor,
+            cancelSignalRegistration,
+            checkpointContext);
         return wasCancelled
             ? (int)CliExitCode.Cancelled
             : (int)CliExitCode.Success;
@@ -3439,6 +3770,98 @@ internal static class Program
             [TAREFA]
             {prompt}
             """;
+    }
+
+    private static PromptExecutionCheckpointContext CreatePromptCheckpointContext(
+        string command,
+        string prompt,
+        string? model,
+        string? skillName,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+
+        return new PromptExecutionCheckpointContext(
+            SessionId: Guid.NewGuid().ToString("N"),
+            Command: command.Trim(),
+            Prompt: prompt.Trim(),
+            Model: string.IsNullOrWhiteSpace(model) ? null : model.Trim(),
+            SkillName: string.IsNullOrWhiteSpace(skillName) ? null : skillName.Trim(),
+            ExecutionCheckpointAppender: executionCheckpointAppender);
+    }
+
+    private static void WriteExecutionStateAndCheckpoint(
+        ExecutionState state,
+        string? detail,
+        PromptExecutionCheckpointContext? checkpointContext,
+        ExecutionCheckpointStatus? checkpointStatus = null)
+    {
+        WriteExecutionState(state, detail);
+
+        if (checkpointContext is not PromptExecutionCheckpointContext context)
+        {
+            return;
+        }
+
+        var checkpoint = new ExecutionSessionCheckpoint(
+            TimestampUtc: DateTimeOffset.UtcNow,
+            SessionId: context.SessionId,
+            Command: context.Command,
+            Stage: ResolveCheckpointStage(state),
+            Status: checkpointStatus ?? ResolveCheckpointStatus(state),
+            Prompt: context.Prompt,
+            Model: context.Model,
+            SkillName: context.SkillName,
+            Detail: detail ?? string.Empty);
+        TryAppendExecutionCheckpoint(checkpoint, context.ExecutionCheckpointAppender);
+    }
+
+    private static void TryAppendExecutionCheckpoint(
+        ExecutionSessionCheckpoint checkpoint,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+    {
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+
+        try
+        {
+            executionCheckpointAppender(checkpoint);
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or IOException
+            or JsonException
+            or UnauthorizedAccessException)
+        {
+            ConsoleLogger.Error(
+                $"Nao foi possivel registrar checkpoint local da execucao. {ex.Message}");
+        }
+    }
+
+    private static ExecutionCheckpointStatus ResolveCheckpointStatus(ExecutionState state)
+    {
+        return state switch
+        {
+            ExecutionState.Completed => ExecutionCheckpointStatus.Completed,
+            ExecutionState.Error => ExecutionCheckpointStatus.Failed,
+            _ => ExecutionCheckpointStatus.InProgress
+        };
+    }
+
+    private static string ResolveCheckpointStage(ExecutionState state)
+    {
+        return state switch
+        {
+            ExecutionState.Connecting => "connecting",
+            ExecutionState.ToolCall => "tool-call",
+            ExecutionState.Processing => "processing",
+            ExecutionState.Diff => "diff",
+            ExecutionState.Completed => "completed",
+            ExecutionState.Error => "error",
+            _ => "unknown"
+        };
     }
 
     private static void WriteExecutionState(ExecutionState state, string? detail = null)
@@ -3724,6 +4147,272 @@ internal static class Program
 
         Console.CancelKeyPress += handler;
         return new DisposableAction(() => Console.CancelKeyPress -= handler);
+    }
+
+    private static Func<string, string?, CancellationToken, IAsyncEnumerable<string>> WrapPromptExecutorWithModelFallback(
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(modelsExecutor);
+
+        return (prompt, model, cancellationToken) => ExecutePromptWithModelFallbackAsync(
+            prompt,
+            model,
+            promptExecutor,
+            modelsExecutor,
+            cancellationToken);
+    }
+
+    private static async IAsyncEnumerable<string> ExecutePromptWithModelFallbackAsync(
+        string prompt,
+        string? model,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var fallbackCandidates = BuildInitialModelFallbackCandidates(model);
+        var localFallbackModelsLoaded = false;
+
+        for (var candidateIndex = 0; candidateIndex < fallbackCandidates.Count; candidateIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var candidateModel = fallbackCandidates[candidateIndex];
+            IAsyncEnumerator<string>? enumerator = null;
+            var emittedChunks = false;
+            Exception? capturedFailure = null;
+
+            try
+            {
+                try
+                {
+                    enumerator = promptExecutor(prompt, candidateModel, cancellationToken)
+                        .GetAsyncEnumerator(cancellationToken);
+                }
+                catch (Exception ex) when (ShouldFallbackToNextModel(ex, emittedChunks, cancellationToken))
+                {
+                    capturedFailure = ex;
+                }
+
+                if (capturedFailure is null && enumerator is not null)
+                {
+                    while (true)
+                    {
+                        string currentChunk;
+                        try
+                        {
+                            if (!await enumerator.MoveNextAsync())
+                            {
+                                break;
+                            }
+
+                            currentChunk = enumerator.Current;
+                        }
+                        catch (Exception ex) when (ShouldFallbackToNextModel(ex, emittedChunks, cancellationToken))
+                        {
+                            capturedFailure = ex;
+                            break;
+                        }
+
+                        emittedChunks = true;
+                        yield return currentChunk;
+                    }
+                }
+
+                if (capturedFailure is null)
+                {
+                    yield break;
+                }
+
+                if (!localFallbackModelsLoaded)
+                {
+                    localFallbackModelsLoaded = true;
+                    await TryAppendFallbackLocalModelsAsync(
+                        fallbackCandidates,
+                        modelsExecutor,
+                        cancellationToken);
+                }
+
+                var nextCandidateIndex = candidateIndex + 1;
+                if (nextCandidateIndex >= fallbackCandidates.Count)
+                {
+                    throw capturedFailure;
+                }
+
+                ConsoleLogger.Info(
+                    $"Modelo '{BuildModelFallbackLabel(candidateModel)}' indisponivel. " +
+                    $"Tentando fallback para '{BuildModelFallbackLabel(fallbackCandidates[nextCandidateIndex])}'.");
+            }
+            finally
+            {
+                if (enumerator is not null)
+                {
+                    await enumerator.DisposeAsync();
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Nao foi possivel executar o prompt porque nenhum modelo de fallback estava disponivel.");
+    }
+
+    private static List<string?> BuildInitialModelFallbackCandidates(string? selectedModel)
+    {
+        var fallbackCandidates = new List<string?>();
+        var knownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(selectedModel))
+        {
+            fallbackCandidates.Add(null);
+        }
+        else
+        {
+            AddCandidate(selectedModel);
+        }
+
+        AddCandidate(OllamaModelDefaults.DefaultModel);
+        return fallbackCandidates;
+
+        void AddCandidate(string? modelName)
+        {
+            if (string.IsNullOrWhiteSpace(modelName))
+            {
+                return;
+            }
+
+            var normalizedModelName = modelName.Trim();
+            if (!knownModels.Add(normalizedModelName))
+            {
+                return;
+            }
+
+            fallbackCandidates.Add(normalizedModelName);
+        }
+    }
+
+    private static async Task TryAppendFallbackLocalModelsAsync(
+        List<string?> fallbackCandidates,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(fallbackCandidates);
+        ArgumentNullException.ThrowIfNull(modelsExecutor);
+
+        var knownModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var fallbackCandidate in fallbackCandidates)
+        {
+            if (string.IsNullOrWhiteSpace(fallbackCandidate))
+            {
+                continue;
+            }
+
+            knownModels.Add(fallbackCandidate.Trim());
+        }
+
+        try
+        {
+            var localModels = await modelsExecutor(cancellationToken);
+            foreach (var localModel in localModels)
+            {
+                if (string.IsNullOrWhiteSpace(localModel.Name))
+                {
+                    continue;
+                }
+
+                var normalizedModelName = localModel.Name.Trim();
+                if (!knownModels.Add(normalizedModelName))
+                {
+                    continue;
+                }
+
+                fallbackCandidates.Add(normalizedModelName);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            ConsoleLogger.Info(
+                $"Nao foi possivel carregar modelos locais para fallback automatico: {ex.Message}");
+        }
+    }
+
+    private static bool ShouldFallbackToNextModel(
+        Exception exception,
+        bool emittedChunks,
+        CancellationToken cancellationToken)
+    {
+        if (emittedChunks)
+        {
+            return false;
+        }
+
+        if (exception is OperationCanceledException)
+        {
+            return false;
+        }
+
+        return !cancellationToken.IsCancellationRequested
+            && IsModelUnavailableFailure(exception);
+    }
+
+    private static bool IsModelUnavailableFailure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        if (exception is HttpRequestException { StatusCode: HttpStatusCode.NotFound })
+        {
+            return true;
+        }
+
+        if (IsPotentialModelUnavailableMessage(exception.Message))
+        {
+            return true;
+        }
+
+        if (exception is InvalidOperationException { InnerException: Exception innerException })
+        {
+            return IsModelUnavailableFailure(innerException);
+        }
+
+        if (exception is AggregateException aggregateException)
+        {
+            foreach (var aggregateInnerException in aggregateException.InnerExceptions)
+            {
+                if (IsModelUnavailableFailure(aggregateInnerException))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsPotentialModelUnavailableMessage(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return false;
+        }
+
+        return message.Contains("HTTP 404", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("model", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("modelo", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("not found", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("nao encontrado", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
+            || message.Contains("indisponivel", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildModelFallbackLabel(string? modelName)
+    {
+        return string.IsNullOrWhiteSpace(modelName)
+            ? "<padrao>"
+            : modelName.Trim();
     }
 
     private static Func<string, string?, CancellationToken, IAsyncEnumerable<string>> WrapPromptExecutorWithResilience(
@@ -4230,6 +4919,14 @@ internal static class Program
         public string? ExpectedContent { get; init; }
     }
 
+    private readonly record struct PromptExecutionCheckpointContext(
+        string SessionId,
+        string Command,
+        string Prompt,
+        string? Model,
+        string? SkillName,
+        Action<ExecutionSessionCheckpoint> ExecutionCheckpointAppender);
+
     private readonly record struct ParseResult(
         bool ShowHelp,
         bool ShowVersion,
@@ -4239,6 +4936,8 @@ internal static class Program
         bool RunModels,
         string? SelectedModel,
         CliFriendlyError? Error,
+        bool RunResume = false,
+        string? ResumeSessionId = null,
         string? ConfigGetKey = null,
         string? ConfigSetKey = null,
         string? ConfigSetValue = null,

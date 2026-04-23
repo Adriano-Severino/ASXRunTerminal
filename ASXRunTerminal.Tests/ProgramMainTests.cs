@@ -52,6 +52,7 @@ public sealed class ProgramMainTests
         Assert.Contains("asxrun patch [--dry-run] <arquivo-json>", result.StdOut);
         Assert.Contains("asxrun history", result.StdOut);
         Assert.Contains("asxrun history [--clear]", result.StdOut);
+        Assert.Contains("asxrun resume [<session-id>]", result.StdOut);
         Assert.Contains("asxrun mcp list", result.StdOut);
         Assert.Contains("asxrun mcp add <nome> --command <cmd> [--arg <valor>]...", result.StdOut);
         Assert.Contains("asxrun mcp add <nome> --url <endpoint> [--transport http|sse]", result.StdOut);
@@ -268,6 +269,83 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Executando comando unico 'ask'.", result.StdOut);
         Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: gerar teste", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AskCommand_FallsBackToAvailableModel_WhenSelectedModelIsUnavailable()
+    {
+        var attemptedModels = new List<string?>();
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndModels(
+            (prompt, model, _) => StreamPromptWithModelFallback(prompt, model),
+            _ => Task.FromResult<IReadOnlyList<OllamaLocalModel>>(
+            [
+                new OllamaLocalModel("llama3.2:latest")
+            ]),
+            "ask",
+            "--model",
+            "qwen2.5-coder:7b",
+            "gerar",
+            "fallback");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Collection(
+            attemptedModels,
+            static candidate => Assert.Equal("qwen2.5-coder:7b", candidate),
+            static candidate => Assert.Equal(OllamaModelDefaults.DefaultModel, candidate),
+            static candidate => Assert.Equal("llama3.2:latest", candidate));
+        Assert.Contains("Modelo: llama3.2:latest | Prompt: gerar fallback", result.StdOut);
+        Assert.Contains(
+            "Modelo 'qwen2.5-coder:7b' indisponivel. Tentando fallback para 'qwen3.5:4b'.",
+            result.StdOut);
+        Assert.Contains(
+            "Modelo 'qwen3.5:4b' indisponivel. Tentando fallback para 'llama3.2:latest'.",
+            result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+
+        return;
+
+        async IAsyncEnumerable<string> StreamPromptWithModelFallback(
+            string prompt,
+            string? model)
+        {
+            attemptedModels.Add(model);
+
+            if (string.Equals(model, "qwen2.5-coder:7b", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(model, OllamaModelDefaults.DefaultModel, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("model not found");
+            }
+
+            yield return $"Modelo: {model ?? "<padrao>"} | Prompt: {prompt}";
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
+    public void Main_AskCommand_DoesNotFallbackModel_WhenFailureIsNotModelUnavailability()
+    {
+        var modelsExecutorCalls = 0;
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndModels(
+            (_, _, _) => throw new InvalidOperationException("falha simulada"),
+            _ =>
+            {
+                modelsExecutorCalls++;
+                return Task.FromResult<IReadOnlyList<OllamaLocalModel>>(
+                [
+                    new OllamaLocalModel("llama3.2:latest")
+                ]);
+            },
+            "ask",
+            "--model",
+            "qwen2.5-coder:7b",
+            "gerar",
+            "erro");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Equal(0, modelsExecutorCalls);
+        Assert.Contains(
+            "[ERROR] Estado de execucao: erro. Nao foi possivel executar o prompt: falha simulada",
+            result.StdErr);
     }
 
     [Fact]
@@ -1963,6 +2041,128 @@ public sealed class ProgramMainTests
         Assert.DoesNotContain("Ocorreu um erro interno", result.StdErr);
     }
 
+    [Fact]
+    public void Main_AskCommand_RegistersExecutionCheckpointForEachStage()
+    {
+        var checkpoints = new List<ExecutionSessionCheckpoint>();
+
+        var result = ExecuteMainWithCheckpoints(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            static () => Array.Empty<ExecutionSessionCheckpoint>(),
+            checkpoint => checkpoints.Add(checkpoint),
+            "ask",
+            "--model",
+            "qwen2.5-coder:7b",
+            "gerar",
+            "teste");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(5, checkpoints.Count);
+        Assert.Equal(
+            ["connecting", "tool-call", "processing", "diff", "completed"],
+            checkpoints.Select(static checkpoint => checkpoint.Stage).ToArray());
+        Assert.Equal(ExecutionCheckpointStatus.Completed, checkpoints[^1].Status);
+        Assert.All(checkpoints, static checkpoint => Assert.Equal("ask", checkpoint.Command));
+        Assert.All(checkpoints, static checkpoint => Assert.Equal("gerar teste", checkpoint.Prompt));
+        Assert.All(checkpoints, static checkpoint => Assert.Equal("qwen2.5-coder:7b", checkpoint.Model));
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ResumeCommand_WhenInterruptedSessionExists_RestartsLatestSession()
+    {
+        var checkpoints = new[]
+        {
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 0, 0, TimeSpan.Zero),
+                SessionId: "sessao-concluida",
+                Command: "ask",
+                Stage: "completed",
+                Status: ExecutionCheckpointStatus.Completed,
+                Prompt: "prompt concluido",
+                Model: "qwen3.5:4b",
+                SkillName: null,
+                Detail: "ok"),
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 1, 0, TimeSpan.Zero),
+                SessionId: "sessao-interrompida",
+                Command: "ask",
+                Stage: "error",
+                Status: ExecutionCheckpointStatus.Failed,
+                Prompt: "retomar este prompt",
+                Model: "qwen2.5-coder:7b",
+                SkillName: null,
+                Detail: "falha")
+        };
+
+        var result = ExecuteMainWithCheckpoints(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            () => checkpoints,
+            static _ => { },
+            "resume");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Buscando checkpoint de sessao interrompida.", result.StdOut);
+        Assert.Contains("Retomando sessao 'sessao-interrompida' do comando 'ask' a partir da etapa 'error'.", result.StdOut);
+        Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: retomar este prompt", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ResumeCommand_WhenNoInterruptedSessionExists_ReturnsRuntimeError()
+    {
+        var checkpoints = new[]
+        {
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 0, 0, TimeSpan.Zero),
+                SessionId: "sessao-concluida",
+                Command: "ask",
+                Stage: "completed",
+                Status: ExecutionCheckpointStatus.Completed,
+                Prompt: "prompt concluido",
+                Model: "qwen3.5:4b",
+                SkillName: null,
+                Detail: "ok")
+        };
+
+        var result = ExecuteMainWithCheckpoints(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            () => checkpoints,
+            static _ => { },
+            "resume");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Contains("Nenhuma sessao interrompida de ask/skill foi encontrada para retomar.", result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ResumeCommand_WithUnknownSessionId_ReturnsInvalidArguments()
+    {
+        var checkpoints = new[]
+        {
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 1, 0, TimeSpan.Zero),
+                SessionId: "sessao-interrompida",
+                Command: "ask",
+                Stage: "error",
+                Status: ExecutionCheckpointStatus.Failed,
+                Prompt: "retomar este prompt",
+                Model: "qwen2.5-coder:7b",
+                SkillName: null,
+                Detail: "falha")
+        };
+
+        var result = ExecuteMainWithCheckpoints(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            () => checkpoints,
+            static _ => { },
+            "resume",
+            "sessao-inexistente");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("Nenhum checkpoint foi encontrado para a sessao 'sessao-inexistente'.", result.StdErr);
+    }
+
     private static ExecutionResult ExecuteMain(params string[] args)
     {
         return ExecuteMainWithInputInternal(null, null, null, null, null, null, null, null, null, args);
@@ -1985,6 +2185,70 @@ public sealed class ProgramMainTests
         params string[] args)
     {
         return ExecuteMainWithInputInternal(null, null, null, promptExecutor, null, null, null, null, null, args);
+    }
+
+    private static ExecutionResult ExecuteMainWithModelAwareStreamingExecutorAndModels(
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+
+        using var stdOutWriter = new StringWriter();
+        using var stdErrWriter = new StringWriter();
+
+        Console.SetOut(stdOutWriter);
+        Console.SetError(stdErrWriter);
+
+        try
+        {
+            var exitCode = Program.RunForTests(args, promptExecutor, modelsExecutor);
+            return new ExecutionResult(
+                ExitCode: exitCode,
+                StdOut: stdOutWriter.ToString(),
+                StdErr: stdErrWriter.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+    }
+
+    private static ExecutionResult ExecuteMainWithCheckpoints(
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>> checkpointLoader,
+        Action<ExecutionSessionCheckpoint> checkpointAppender,
+        params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+
+        using var stdOutWriter = new StringWriter();
+        using var stdErrWriter = new StringWriter();
+
+        Console.SetOut(stdOutWriter);
+        Console.SetError(stdErrWriter);
+
+        try
+        {
+            var exitCode = Program.RunForTests(
+                args,
+                promptExecutor,
+                checkpointAppender,
+                checkpointLoader);
+
+            return new ExecutionResult(
+                ExitCode: exitCode,
+                StdOut: stdOutWriter.ToString(),
+                StdErr: stdErrWriter.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
     }
 
     private static ExecutionResult ExecuteMainWithStreamingExecutorAndCancellation(

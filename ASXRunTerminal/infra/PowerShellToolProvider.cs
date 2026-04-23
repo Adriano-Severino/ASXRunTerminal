@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
@@ -135,6 +136,13 @@ internal sealed class PowerShellToolProvider : IToolProvider
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return ToolExecutionResult.Cancelled(TimeSpan.Zero);
+        }
+        catch (Win32Exception ex)
+        {
+            return ToolExecutionResult.Failure(
+                error: $"PowerShell indisponivel no ambiente atual: {ex.Message}",
+                exitCode: 127,
+                duration: TimeSpan.Zero);
         }
         catch (Exception ex)
         {
