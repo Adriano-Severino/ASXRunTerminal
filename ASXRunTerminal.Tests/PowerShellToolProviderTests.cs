@@ -26,9 +26,13 @@ public sealed class PowerShellToolProviderTests
         {
             Assert.Single(tools);
             Assert.Equal("powershell", tools[0].Name);
-            Assert.Single(tools[0].Parameters);
+            Assert.Equal(2, tools[0].Parameters.Count);
             Assert.Equal("script", tools[0].Parameters[0].Name);
             Assert.True(tools[0].Parameters[0].IsRequired);
+            Assert.Equal(
+                ShellCommandPermissionPolicy.DestructiveApprovalArgumentName,
+                tools[0].Parameters[1].Name);
+            Assert.False(tools[0].Parameters[1].IsRequired);
         }
         else
         {
@@ -99,6 +103,70 @@ public sealed class PowerShellToolProviderTests
         Assert.False(result.IsSuccess);
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("script", result.Error);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsFailure_WhenScriptIsBlockedByShellPolicy()
+    {
+        if (!IsWindows) return;
+
+        var policy = new ShellCommandPermissionPolicy(
+            blockedCommands: ["write-output"]);
+        var provider = new PowerShellToolProvider(() => policy);
+        ToolExecutionRequest request = (
+            "powershell",
+            new Dictionary<string, string> { ["script"] = "Write-Output 'blocked'" });
+
+        var result = await provider.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ShellCommandPermissionPolicy.BlockedCommandExitCode, result.ExitCode);
+        Assert.Contains("alto risco", result.Error);
+        Assert.Contains("write-output", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsFailure_WhenAllowlistedBlockedCommandHasNoExplicitApproval()
+    {
+        if (!IsWindows) return;
+
+        var policy = new ShellCommandPermissionPolicy(
+            allowedCommands: ["write-output"],
+            blockedCommands: ["write-output"]);
+        var provider = new PowerShellToolProvider(() => policy);
+        ToolExecutionRequest request = (
+            "powershell",
+            new Dictionary<string, string> { ["script"] = "Write-Output 'Hello from policy'" });
+
+        var result = await provider.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ShellCommandPermissionPolicy.BlockedCommandExitCode, result.ExitCode);
+        Assert.Contains("aprovacao explicita", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_AllowlistOverridesBlocklist_WhenConfiguredAndExplicitlyApproved()
+    {
+        if (!IsWindows) return;
+
+        var policy = new ShellCommandPermissionPolicy(
+            allowedCommands: ["write-output"],
+            blockedCommands: ["write-output"]);
+        var provider = new PowerShellToolProvider(() => policy);
+        ToolExecutionRequest request = (
+            "powershell",
+            new Dictionary<string, string>
+            {
+                ["script"] = "Write-Output 'Hello from policy'",
+                [ShellCommandPermissionPolicy.DestructiveApprovalArgumentName] = "sim"
+            });
+
+        var result = await provider.ExecuteAsync(request);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("Hello from policy", result.StdOut);
     }
 
     [Fact]

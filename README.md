@@ -179,6 +179,65 @@ Exemplo de `patch.json`:
 }
 ```
 
+### Politicas de permissao por workspace (guardrails de arquivo)
+
+Opcionalmente, o comando `patch` pode ser restrito por workspace com o arquivo:
+
+- `<raiz-do-workspace>/.asxrun/workspace-permissions.json`
+
+Quando o arquivo nao existe, o comportamento padrao continua `allow` para todas as operacoes.
+
+Exemplo de politica com `defaultMode=deny`, liberando edicao apenas em `src/**`
+e bloqueando delete em `src/secrets/**`:
+
+```json
+{
+  "defaultMode": "deny",
+  "edit": {
+    "allow": ["src/**"]
+  },
+  "delete": {
+    "allow": ["src/**"],
+    "deny": ["src/secrets/**"]
+  }
+}
+```
+
+Operacoes suportadas na politica: `read`, `create`, `edit`, `copy`, `move`, `delete`.
+
+### Politicas de comandos de shell de alto risco
+
+Os providers de shell (`powershell`, `bash`, `zsh`) aplicam guardrails antes da execucao
+do script para bloquear comandos de alto risco.
+
+Arquivo opcional por workspace:
+
+- `<raiz-do-workspace>/.asxrun/shell-command-policy.json`
+
+Quando esse arquivo nao existe, o CLI usa uma `blocklist` default para comandos sensiveis
+(ex.: `rm`, `remove-item`, `diskpart`, `shutdown`, `dd`, `mkfs`).
+
+Mesmo quando um comando sensivel estiver em `allow`, a execucao continua bloqueada por padrao
+ate receber aprovacao explicita no argumento da tool call:
+
+- `destructive_approval=sim`
+
+Exemplo de politica liberando explicitamente `rm` e adicionando bloqueio para `echo`:
+
+```json
+{
+  "allow": ["rm"],
+  "deny": ["echo"]
+}
+```
+
+Regras:
+
+- `deny`: adiciona comandos bloqueados.
+- `allow`: libera comandos bloqueados (override explicito).
+- comandos desbloqueados via `allow` exigem aprovacao explicita por execucao (`destructive_approval=sim`).
+- comando bloqueado retorna `exit code 126`.
+
 ### Prompt unico
 
 ```bash

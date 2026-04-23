@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 
 namespace ASXRunTerminal.Infra;
@@ -6,6 +7,7 @@ namespace ASXRunTerminal.Infra;
 internal sealed class PowerShellToolProvider : IToolProvider
 {
     private const string ToolName = "powershell";
+    private readonly Func<ShellCommandPermissionPolicy> _policyResolver;
 
     private static readonly ToolDescriptor Descriptor = new(
         Name: ToolName,
@@ -15,10 +17,24 @@ internal sealed class PowerShellToolProvider : IToolProvider
             new ToolParameter(
                 Name: "script",
                 Description: "O script ou comando PowerShell a ser executado.",
-                IsRequired: true)
+                IsRequired: true),
+            new ToolParameter(
+                Name: ShellCommandPermissionPolicy.DestructiveApprovalArgumentName,
+                Description: "Aprovacao explicita para comandos destrutivos bloqueados por padrao (use 'sim').",
+                IsRequired: false)
         ]);
 
     public string ProviderName => "shell";
+
+    public PowerShellToolProvider()
+        : this(ResolvePolicyForCurrentWorkspace)
+    {
+    }
+
+    internal PowerShellToolProvider(Func<ShellCommandPermissionPolicy> policyResolver)
+    {
+        _policyResolver = policyResolver ?? throw new ArgumentNullException(nameof(policyResolver));
+    }
 
     public IReadOnlyList<ToolDescriptor> ListTools()
     {
@@ -58,6 +74,18 @@ internal sealed class PowerShellToolProvider : IToolProvider
                 error: "Parametro obrigatorio 'script' nao foi informado.",
                 exitCode: 1,
                 duration: TimeSpan.Zero);
+        }
+
+        var hasExplicitDestructiveApproval =
+            ShellCommandGuardrailEvaluator.HasExplicitDestructiveCommandApproval(request.Arguments);
+        var guardrailResult = ShellCommandGuardrailEvaluator.ValidateScript(
+            toolName: request.ToolName,
+            script: script,
+            policyResolver: _policyResolver,
+            isDestructiveCommandApproved: hasExplicitDestructiveApproval);
+        if (guardrailResult is ToolExecutionResult blockedExecutionResult)
+        {
+            return blockedExecutionResult;
         }
 
         var executor = new ShellProcessExecutor();
@@ -115,5 +143,11 @@ internal sealed class PowerShellToolProvider : IToolProvider
                 exitCode: 1,
                 duration: TimeSpan.Zero);
         }
+    }
+
+    private static ShellCommandPermissionPolicy ResolvePolicyForCurrentWorkspace()
+    {
+        var workspaceRoot = WorkspaceRootDetector.Resolve();
+        return ShellCommandPermissionPolicyFile.Load(workspaceRoot.DirectoryPath);
     }
 }

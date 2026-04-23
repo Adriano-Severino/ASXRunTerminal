@@ -29,6 +29,10 @@ public sealed class UnixShellToolProviderTests
             Assert.Contains(tools, t => t.Name == "zsh");
             Assert.Equal("script", tools[0].Parameters[0].Name);
             Assert.True(tools[0].Parameters[0].IsRequired);
+            Assert.Equal(
+                ShellCommandPermissionPolicy.DestructiveApprovalArgumentName,
+                tools[0].Parameters[1].Name);
+            Assert.False(tools[0].Parameters[1].IsRequired);
         }
         else
         {
@@ -101,6 +105,70 @@ public sealed class UnixShellToolProviderTests
         Assert.False(result.IsSuccess);
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("script", result.Error);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsFailure_WhenScriptIsBlockedByShellPolicy()
+    {
+        if (!IsUnix) return;
+
+        var policy = new ShellCommandPermissionPolicy(
+            blockedCommands: ["echo"]);
+        var provider = new UnixShellToolProvider(() => policy);
+        ToolExecutionRequest request = (
+            "bash",
+            new Dictionary<string, string> { ["script"] = "echo 'blocked'" });
+
+        var result = await provider.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ShellCommandPermissionPolicy.BlockedCommandExitCode, result.ExitCode);
+        Assert.Contains("alto risco", result.Error);
+        Assert.Contains("echo", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReturnsFailure_WhenAllowlistedBlockedCommandHasNoExplicitApproval()
+    {
+        if (!IsUnix) return;
+
+        var policy = new ShellCommandPermissionPolicy(
+            allowedCommands: ["echo"],
+            blockedCommands: ["echo"]);
+        var provider = new UnixShellToolProvider(() => policy);
+        ToolExecutionRequest request = (
+            "bash",
+            new Dictionary<string, string> { ["script"] = "echo 'hello policy'" });
+
+        var result = await provider.ExecuteAsync(request);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(ShellCommandPermissionPolicy.BlockedCommandExitCode, result.ExitCode);
+        Assert.Contains("aprovacao explicita", result.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_AllowlistOverridesBlocklist_WhenConfiguredAndExplicitlyApproved()
+    {
+        if (!IsUnix) return;
+
+        var policy = new ShellCommandPermissionPolicy(
+            allowedCommands: ["echo"],
+            blockedCommands: ["echo"]);
+        var provider = new UnixShellToolProvider(() => policy);
+        ToolExecutionRequest request = (
+            "bash",
+            new Dictionary<string, string>
+            {
+                ["script"] = "echo 'hello policy'",
+                [ShellCommandPermissionPolicy.DestructiveApprovalArgumentName] = "sim"
+            });
+
+        var result = await provider.ExecuteAsync(request);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("hello policy", result.StdOut);
     }
 
     [Fact]

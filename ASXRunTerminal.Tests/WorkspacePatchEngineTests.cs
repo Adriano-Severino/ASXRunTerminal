@@ -165,6 +165,33 @@ public sealed class WorkspacePatchEngineTests
     }
 
     [Fact]
+    public void Apply_WhenPermissionPolicyDeniesEdit_ThrowsUnauthorizedAccessException()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "src/protected.txt", "conteudo protegido");
+        var permissionPolicy = new WorkspaceFilePermissionPolicy(
+            rules: new Dictionary<WorkspaceFilePermissionOperation, WorkspaceFilePermissionRule>
+            {
+                [WorkspaceFilePermissionOperation.Edit] = new WorkspaceFilePermissionRule(
+                    AllowPatterns: [],
+                    DenyPatterns: ["src/protected.txt"])
+            });
+        var engine = new WorkspacePatchEngine(root, permissionPolicy);
+
+        WorkspacePatchRequest request = new WorkspacePatchRequest(
+            Changes:
+            [
+                (WorkspacePatchChangeKind.Edit, "src/protected.txt", "conteudo alterado")
+            ]);
+
+        var exception = Assert.Throws<UnauthorizedAccessException>(
+            () => engine.Apply(request));
+
+        Assert.Contains("nao e permitida", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("conteudo protegido", File.ReadAllText(Path.Combine(root, "src", "protected.txt")));
+    }
+
+    [Fact]
     public void Apply_DeleteInPreview_GeneratesDiffWithDevNull_WithoutDeletingFile()
     {
         var root = CreateTemporaryDirectory();

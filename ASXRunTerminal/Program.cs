@@ -12,6 +12,10 @@ internal static class Program
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
     private const string InteractiveChatPromptPrefix = "> ";
+    private const int ResilienceRetryAttempts = 3;
+    private const int ResilienceCircuitFailureThreshold = 3;
+    private static readonly TimeSpan ResilienceRetryDelay = TimeSpan.FromMilliseconds(150);
+    private static readonly TimeSpan ResilienceCircuitOpenDuration = TimeSpan.FromSeconds(20);
     private static readonly string[] InteractiveChatCommandSuggestions =
     [
         "/help",
@@ -356,6 +360,16 @@ internal static class Program
         mcpServersSaver ??= DefaultMcpServersSaver;
         mcpServerTester ??= DefaultMcpServerTester;
         workspacePatchAuditAppender ??= NoOpWorkspacePatchAuditAppender;
+        var promptResilience = new ResilienceState("Ollama/prompt");
+        var healthcheckResilience = new ResilienceState("Ollama/healthcheck");
+        var modelsResilience = new ResilienceState("Ollama/models");
+        var mcpResilience = new ResilienceState("MCP/test");
+        var resilientPromptExecutor = WrapPromptExecutorWithResilience(promptExecutor, promptResilience);
+        var resilientHealthcheckExecutor = WrapHealthcheckExecutorWithResilience(
+            healthcheckExecutor,
+            healthcheckResilience);
+        var resilientModelsExecutor = WrapModelsExecutorWithResilience(modelsExecutor, modelsResilience);
+        var resilientMcpServerTester = WrapMcpServerTesterWithResilience(mcpServerTester, mcpResilience);
 
         try
         {
@@ -393,7 +407,7 @@ internal static class Program
                 return ExecuteAsk(
                     parseResult.AskPrompt,
                     parseResult.SelectedModel,
-                    promptExecutor,
+                    resilientPromptExecutor,
                     cancelSignalRegistration);
             }
 
@@ -401,8 +415,8 @@ internal static class Program
             {
                 return ExecuteChat(
                     parseResult.SelectedModel,
-                    promptExecutor,
-                    modelsExecutor,
+                    resilientPromptExecutor,
+                    resilientModelsExecutor,
                     toolRuntime,
                     cancelSignalRegistration,
                     historyLoader);
@@ -410,12 +424,12 @@ internal static class Program
 
             if (parseResult.RunDoctor)
             {
-                return ExecuteDoctor(healthcheckExecutor);
+                return ExecuteDoctor(resilientHealthcheckExecutor);
             }
 
             if (parseResult.RunModels)
             {
-                return ExecuteModels(modelsExecutor);
+                return ExecuteModels(resilientModelsExecutor);
             }
 
             if (parseResult.RunContext)
@@ -465,7 +479,7 @@ internal static class Program
                 return ExecuteMcpTest(
                     serverNameToTest,
                     mcpServersLoader,
-                    mcpServerTester);
+                    resilientMcpServerTester);
             }
 
             if (parseResult.ConfigGetKey is not null)
@@ -508,7 +522,7 @@ internal static class Program
                     parseResult.RunSkillName,
                     parseResult.SkillPrompt,
                     parseResult.SelectedModel,
-                    promptExecutor,
+                    resilientPromptExecutor,
                     cancelSignalRegistration);
             }
 
@@ -2622,7 +2636,10 @@ internal static class Program
             workspaceRoot = WorkspaceRootDetector.Resolve();
             resolvedPatchRequestFilePath = ResolvePatchRequestFilePath(patchRequestFilePath);
             var patchRequest = LoadWorkspacePatchRequest(resolvedPatchRequestFilePath, dryRun);
-            var patchEngine = new WorkspacePatchEngine(workspaceRoot.DirectoryPath);
+            var permissionPolicy = WorkspacePermissionPolicyFile.Load(workspaceRoot.DirectoryPath);
+            var patchEngine = new WorkspacePatchEngine(
+                workspaceRoot.DirectoryPath,
+                permissionPolicy);
 
             if (patchRequest.PreviewOnly)
             {
@@ -3709,6 +3726,319 @@ internal static class Program
         return new DisposableAction(() => Console.CancelKeyPress -= handler);
     }
 
+    private static Func<string, string?, CancellationToken, IAsyncEnumerable<string>> WrapPromptExecutorWithResilience(
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        ResilienceState resilienceState)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(resilienceState);
+
+        return (prompt, model, cancellationToken) => ExecutePromptWithResilienceAsync(
+            prompt,
+            model,
+            promptExecutor,
+            resilienceState,
+            cancellationToken);
+    }
+
+    private static async IAsyncEnumerable<string> ExecutePromptWithResilienceAsync(
+        string prompt,
+        string? model,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        ResilienceState resilienceState,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= ResilienceRetryAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            resilienceState.EnsureCallAllowed();
+
+            IAsyncEnumerator<string>? enumerator = null;
+            var emittedChunks = false;
+            var shouldRetry = false;
+            Exception? capturedFailure = null;
+
+            try
+            {
+                enumerator = promptExecutor(prompt, model, cancellationToken)
+                    .GetAsyncEnumerator(cancellationToken);
+
+                while (true)
+                {
+                    string chunk;
+                    try
+                    {
+                        if (!await enumerator.MoveNextAsync())
+                        {
+                            break;
+                        }
+
+                        chunk = enumerator.Current;
+                    }
+                    catch (Exception ex) when (IsTransientFailure(ex, cancellationToken))
+                    {
+                        capturedFailure = ex;
+                        shouldRetry = !emittedChunks && CanRetry(attempt);
+                        break;
+                    }
+
+                    emittedChunks = true;
+                    yield return chunk;
+                }
+            }
+            finally
+            {
+                if (enumerator is not null)
+                {
+                    await enumerator.DisposeAsync();
+                }
+            }
+
+            if (capturedFailure is null)
+            {
+                resilienceState.RegisterSuccess();
+                yield break;
+            }
+
+            if (!emittedChunks)
+            {
+                resilienceState.RegisterFailure();
+            }
+
+            if (shouldRetry)
+            {
+                await WaitBeforeRetryAsync(cancellationToken);
+                continue;
+            }
+
+            throw capturedFailure;
+        }
+
+        throw new InvalidOperationException(
+            "Nao foi possivel executar o prompt no momento.");
+    }
+
+    private static Func<CancellationToken, Task<OllamaHealthcheckResult>> WrapHealthcheckExecutorWithResilience(
+        Func<CancellationToken, Task<OllamaHealthcheckResult>> healthcheckExecutor,
+        ResilienceState resilienceState)
+    {
+        ArgumentNullException.ThrowIfNull(healthcheckExecutor);
+        ArgumentNullException.ThrowIfNull(resilienceState);
+
+        return cancellationToken => ExecuteHealthcheckWithResilienceAsync(
+            healthcheckExecutor,
+            resilienceState,
+            cancellationToken);
+    }
+
+    private static async Task<OllamaHealthcheckResult> ExecuteHealthcheckWithResilienceAsync(
+        Func<CancellationToken, Task<OllamaHealthcheckResult>> healthcheckExecutor,
+        ResilienceState resilienceState,
+        CancellationToken cancellationToken)
+    {
+        OllamaHealthcheckResult? lastFailureResult = null;
+
+        for (var attempt = 1; attempt <= ResilienceRetryAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                resilienceState.EnsureCallAllowed();
+            }
+            catch (CircuitBreakerOpenException circuitOpenException)
+            {
+                return OllamaHealthcheckResult.Unhealthy(circuitOpenException.Message);
+            }
+
+            try
+            {
+                var healthcheckResult = await healthcheckExecutor(cancellationToken);
+                if (healthcheckResult.IsHealthy)
+                {
+                    resilienceState.RegisterSuccess();
+                    return healthcheckResult;
+                }
+
+                lastFailureResult = healthcheckResult;
+                resilienceState.RegisterFailure();
+            }
+            catch (Exception ex) when (IsTransientFailure(ex, cancellationToken))
+            {
+                lastFailureResult = OllamaHealthcheckResult.Unhealthy(ex.Message);
+                resilienceState.RegisterFailure();
+            }
+
+            if (!CanRetry(attempt))
+            {
+                break;
+            }
+
+            await WaitBeforeRetryAsync(cancellationToken);
+        }
+
+        return lastFailureResult ?? OllamaHealthcheckResult.Unhealthy(
+            "Nao foi possivel validar a disponibilidade do Ollama.");
+    }
+
+    private static Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> WrapModelsExecutorWithResilience(
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        ResilienceState resilienceState)
+    {
+        ArgumentNullException.ThrowIfNull(modelsExecutor);
+        ArgumentNullException.ThrowIfNull(resilienceState);
+
+        return cancellationToken => ExecuteModelsWithResilienceAsync(
+            modelsExecutor,
+            resilienceState,
+            cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<OllamaLocalModel>> ExecuteModelsWithResilienceAsync(
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        ResilienceState resilienceState,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= ResilienceRetryAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            resilienceState.EnsureCallAllowed();
+
+            try
+            {
+                var models = await modelsExecutor(cancellationToken);
+                resilienceState.RegisterSuccess();
+                return models;
+            }
+            catch (Exception ex) when (IsTransientFailure(ex, cancellationToken)
+                && CanRetry(attempt))
+            {
+                resilienceState.RegisterFailure();
+                await WaitBeforeRetryAsync(cancellationToken);
+            }
+            catch (Exception ex) when (IsTransientFailure(ex, cancellationToken))
+            {
+                resilienceState.RegisterFailure();
+                throw;
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Nao foi possivel listar os modelos locais do Ollama no momento.");
+    }
+
+    private static Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>> WrapMcpServerTesterWithResilience(
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>> mcpServerTester,
+        ResilienceState resilienceState)
+    {
+        ArgumentNullException.ThrowIfNull(mcpServerTester);
+        ArgumentNullException.ThrowIfNull(resilienceState);
+
+        return (server, cancellationToken) => ExecuteMcpServerTestWithResilienceAsync(
+            mcpServerTester,
+            resilienceState,
+            server,
+            cancellationToken);
+    }
+
+    private static async Task<McpServerTestResult> ExecuteMcpServerTestWithResilienceAsync(
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>> mcpServerTester,
+        ResilienceState resilienceState,
+        McpServerDefinition server,
+        CancellationToken cancellationToken)
+    {
+        McpServerTestResult? lastFailureResult = null;
+
+        for (var attempt = 1; attempt <= ResilienceRetryAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                resilienceState.EnsureCallAllowed();
+            }
+            catch (CircuitBreakerOpenException circuitOpenException)
+            {
+                return McpServerTestResult.Failure(circuitOpenException.Message);
+            }
+
+            try
+            {
+                var testResult = await mcpServerTester(server, cancellationToken);
+                if (testResult.IsSuccess)
+                {
+                    resilienceState.RegisterSuccess();
+                    return testResult;
+                }
+
+                lastFailureResult = testResult;
+                resilienceState.RegisterFailure();
+            }
+            catch (Exception ex) when (IsTransientFailure(ex, cancellationToken))
+            {
+                resilienceState.RegisterFailure();
+                if (!CanRetry(attempt))
+                {
+                    throw;
+                }
+
+                await WaitBeforeRetryAsync(cancellationToken);
+                continue;
+            }
+
+            if (!CanRetry(attempt))
+            {
+                break;
+            }
+
+            await WaitBeforeRetryAsync(cancellationToken);
+        }
+
+        return lastFailureResult ?? McpServerTestResult.Failure(
+            "Nao foi possivel testar o servidor MCP no momento.");
+    }
+
+    private static bool CanRetry(int attempt)
+    {
+        return attempt < ResilienceRetryAttempts;
+    }
+
+    private static async Task WaitBeforeRetryAsync(CancellationToken cancellationToken)
+    {
+        if (ResilienceRetryDelay == TimeSpan.Zero)
+        {
+            return;
+        }
+
+        await Task.Delay(ResilienceRetryDelay, cancellationToken);
+    }
+
+    private static bool IsTransientFailure(Exception exception, CancellationToken cancellationToken)
+    {
+        if (exception is CircuitBreakerOpenException)
+        {
+            return false;
+        }
+
+        if (exception is OperationCanceledException)
+        {
+            return !cancellationToken.IsCancellationRequested;
+        }
+
+        if (exception is TimeoutException or HttpRequestException or IOException)
+        {
+            return true;
+        }
+
+        if (exception is InvalidOperationException invalidOperationException
+            && invalidOperationException.InnerException is Exception innerException)
+        {
+            return IsTransientFailure(innerException, cancellationToken);
+        }
+
+        return false;
+    }
+
     private static Func<string, string?, CancellationToken, IAsyncEnumerable<string>> WrapLegacyPromptExecutor(
         Func<string, string> promptExecutor)
     {
@@ -3771,6 +4101,101 @@ internal static class Program
         }
 
         return userConfig.DefaultModel;
+    }
+
+    private sealed class ResilienceState
+    {
+        private readonly string _operationName;
+        private readonly object _lock = new();
+        private int _consecutiveFailures;
+        private DateTimeOffset? _circuitOpenUntil;
+
+        public ResilienceState(string operationName)
+        {
+            if (string.IsNullOrWhiteSpace(operationName))
+            {
+                throw new ArgumentException(
+                    "O nome da operacao resiliente nao pode ser vazio.",
+                    nameof(operationName));
+            }
+
+            _operationName = operationName.Trim();
+        }
+
+        public void EnsureCallAllowed()
+        {
+            lock (_lock)
+            {
+                if (_circuitOpenUntil is not DateTimeOffset openUntil)
+                {
+                    return;
+                }
+
+                var now = DateTimeOffset.UtcNow;
+                if (now >= openUntil)
+                {
+                    _circuitOpenUntil = null;
+                    _consecutiveFailures = 0;
+                    return;
+                }
+
+                throw new CircuitBreakerOpenException(
+                    _operationName,
+                    openUntil - now);
+            }
+        }
+
+        public void RegisterSuccess()
+        {
+            lock (_lock)
+            {
+                _consecutiveFailures = 0;
+                _circuitOpenUntil = null;
+            }
+        }
+
+        public void RegisterFailure()
+        {
+            lock (_lock)
+            {
+                if (_circuitOpenUntil is not null)
+                {
+                    return;
+                }
+
+                _consecutiveFailures++;
+                if (_consecutiveFailures < ResilienceCircuitFailureThreshold)
+                {
+                    return;
+                }
+
+                _consecutiveFailures = 0;
+                _circuitOpenUntil = DateTimeOffset.UtcNow + ResilienceCircuitOpenDuration;
+            }
+        }
+    }
+
+    private sealed class CircuitBreakerOpenException : InvalidOperationException
+    {
+        public CircuitBreakerOpenException(string operationName, TimeSpan retryAfter)
+            : base(BuildMessage(operationName, retryAfter))
+        {
+            OperationName = operationName;
+            RetryAfter = retryAfter < TimeSpan.Zero ? TimeSpan.Zero : retryAfter;
+        }
+
+        public string OperationName { get; }
+
+        public TimeSpan RetryAfter { get; }
+
+        private static string BuildMessage(string operationName, TimeSpan retryAfter)
+        {
+            var safeRetryAfter = retryAfter < TimeSpan.Zero ? TimeSpan.Zero : retryAfter;
+            var milliseconds = Math.Ceiling(safeRetryAfter.TotalMilliseconds);
+            return
+                $"Circuit breaker aberto para '{operationName}'. " +
+                $"Novas tentativas em aproximadamente {milliseconds:0} ms.";
+        }
     }
 
     private sealed class DisposableAction(Action dispose)

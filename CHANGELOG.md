@@ -9,6 +9,8 @@ O formato segue o Keep a Changelog e o versionamento segue Semantic Versioning.
 ### Adicionado
 - Suporte a tema configuravel via `config` com chave `theme` e valores `auto`, `light`, `dark` e `high-contrast`.
 - Comandos interativos no modo `chat`: `/help`, `/clear`, `/models`, `/tools` e `/exit`.
+- Guardrails por workspace para operacoes de arquivo via `.asxrun/workspace-permissions.json`, aplicados no comando `patch` (incluindo `--dry-run`).
+- Camada de resiliencia operacional com retries e circuit breaker para fluxos de Ollama (`ask/chat`, `doctor`, `models`) e `mcp test`.
 
 ## [0.1.0] - 2026-04-03
 

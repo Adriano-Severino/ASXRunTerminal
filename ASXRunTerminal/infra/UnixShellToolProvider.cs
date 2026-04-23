@@ -1,10 +1,13 @@
 using System.Runtime.InteropServices;
+using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 
 namespace ASXRunTerminal.Infra;
 
 internal sealed class UnixShellToolProvider : IToolProvider
 {
+    private readonly Func<ShellCommandPermissionPolicy> _policyResolver;
+
     private static readonly ToolDescriptor BashDescriptor = new(
         Name: "bash",
         Description: "Executa scripts Bash localmente no Linux/macOS.",
@@ -13,7 +16,11 @@ internal sealed class UnixShellToolProvider : IToolProvider
             new ToolParameter(
                 Name: "script",
                 Description: "O script ou comando Bash a ser executado.",
-                IsRequired: true)
+                IsRequired: true),
+            new ToolParameter(
+                Name: ShellCommandPermissionPolicy.DestructiveApprovalArgumentName,
+                Description: "Aprovacao explicita para comandos destrutivos bloqueados por padrao (use 'sim').",
+                IsRequired: false)
         ]);
 
     private static readonly ToolDescriptor ZshDescriptor = new(
@@ -24,10 +31,24 @@ internal sealed class UnixShellToolProvider : IToolProvider
             new ToolParameter(
                 Name: "script",
                 Description: "O script ou comando Zsh a ser executado.",
-                IsRequired: true)
+                IsRequired: true),
+            new ToolParameter(
+                Name: ShellCommandPermissionPolicy.DestructiveApprovalArgumentName,
+                Description: "Aprovacao explicita para comandos destrutivos bloqueados por padrao (use 'sim').",
+                IsRequired: false)
         ]);
 
     public string ProviderName => "shell";
+
+    public UnixShellToolProvider()
+        : this(ResolvePolicyForCurrentWorkspace)
+    {
+    }
+
+    internal UnixShellToolProvider(Func<ShellCommandPermissionPolicy> policyResolver)
+    {
+        _policyResolver = policyResolver ?? throw new ArgumentNullException(nameof(policyResolver));
+    }
 
     public IReadOnlyList<ToolDescriptor> ListTools()
     {
@@ -68,6 +89,18 @@ internal sealed class UnixShellToolProvider : IToolProvider
                 error: "Parametro obrigatorio 'script' nao foi informado.",
                 exitCode: 1,
                 duration: TimeSpan.Zero);
+        }
+
+        var hasExplicitDestructiveApproval =
+            ShellCommandGuardrailEvaluator.HasExplicitDestructiveCommandApproval(request.Arguments);
+        var guardrailResult = ShellCommandGuardrailEvaluator.ValidateScript(
+            toolName: request.ToolName,
+            script: script,
+            policyResolver: _policyResolver,
+            isDestructiveCommandApproved: hasExplicitDestructiveApproval);
+        if (guardrailResult is ToolExecutionResult blockedExecutionResult)
+        {
+            return blockedExecutionResult;
         }
 
         string shellInterpreter = string.Equals(request.ToolName, "zsh", StringComparison.OrdinalIgnoreCase) ? "zsh" : "bash";
@@ -126,5 +159,11 @@ internal sealed class UnixShellToolProvider : IToolProvider
                 exitCode: 1,
                 duration: TimeSpan.Zero);
         }
+    }
+
+    private static ShellCommandPermissionPolicy ResolvePolicyForCurrentWorkspace()
+    {
+        var workspaceRoot = WorkspaceRootDetector.Resolve();
+        return ShellCommandPermissionPolicyFile.Load(workspaceRoot.DirectoryPath);
     }
 }

@@ -9,6 +9,11 @@ Arquivo de usuario bootstrapado automaticamente:
 - `~/.asxrun/mcp-servers.json`
 - `~/.asxrun/patch-audit`
 
+Arquivos opcionais por workspace:
+
+- `<workspace>/.asxrun/workspace-permissions.json`
+- `<workspace>/.asxrun/shell-command-policy.json`
+
 Chaves suportadas:
 
 - `ollama_host` (URL absoluta, exemplo: `http://127.0.0.1:11434/`)

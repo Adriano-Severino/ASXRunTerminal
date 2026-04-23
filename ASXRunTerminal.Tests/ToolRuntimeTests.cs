@@ -150,6 +150,30 @@ public sealed class ToolRuntimeTests
     }
 
     [Fact]
+    public void ToolExecutionResult_Factories_MaskSensitiveValuesFromOutputAndError()
+    {
+        var success = ToolExecutionResult.Success(
+            output: "token=abc123",
+            duration: TimeSpan.Zero,
+            stdErr: "Authorization: Bearer super-secret");
+        var failure = ToolExecutionResult.Failure(
+            error: "password=hunter2",
+            exitCode: 1,
+            duration: TimeSpan.Zero,
+            stdOut: "api_key=qwerty");
+
+        Assert.Equal("token=***", success.StdOut);
+        Assert.Equal("Authorization: Bearer ***", success.StdErr);
+        Assert.DoesNotContain("abc123", success.StdOut, StringComparison.Ordinal);
+        Assert.DoesNotContain("super-secret", success.StdErr, StringComparison.Ordinal);
+
+        Assert.Equal("api_key=***", failure.StdOut);
+        Assert.Equal("password=***", failure.StdErr);
+        Assert.DoesNotContain("qwerty", failure.StdOut, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", failure.StdErr, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ToolExecutionResult_ImplicitOperatorFromString_MapsToSuccess()
     {
         ToolExecutionResult result = "resultado simples";

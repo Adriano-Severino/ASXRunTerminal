@@ -23,8 +23,8 @@ internal readonly record struct ToolExecutionResult(
     {
         return new ToolExecutionResult(
             IsSuccess: true,
-            StdOut: output,
-            StdErr: stdErr?.TrimEnd() ?? string.Empty,
+            StdOut: Sanitize(output),
+            StdErr: Sanitize(stdErr),
             ExitCode: 0,
             Duration: duration,
             IsTimedOut: false,
@@ -39,8 +39,8 @@ internal readonly record struct ToolExecutionResult(
     {
         return new ToolExecutionResult(
             IsSuccess: false,
-            StdOut: stdOut?.TrimEnd() ?? string.Empty,
-            StdErr: error.TrimEnd(),
+            StdOut: Sanitize(stdOut),
+            StdErr: Sanitize(error),
             ExitCode: exitCode,
             Duration: duration,
             IsTimedOut: false,
@@ -58,8 +58,8 @@ internal readonly record struct ToolExecutionResult(
 
         return new ToolExecutionResult(
             IsSuccess: false,
-            StdOut: stdOut?.TrimEnd() ?? string.Empty,
-            StdErr: resolvedStdErr.TrimEnd(),
+            StdOut: Sanitize(stdOut),
+            StdErr: Sanitize(resolvedStdErr),
             ExitCode: TimeoutExitCode,
             Duration: duration,
             IsTimedOut: true,
@@ -77,8 +77,8 @@ internal readonly record struct ToolExecutionResult(
 
         return new ToolExecutionResult(
             IsSuccess: false,
-            StdOut: stdOut?.TrimEnd() ?? string.Empty,
-            StdErr: resolvedStdErr.TrimEnd(),
+            StdOut: Sanitize(stdOut),
+            StdErr: Sanitize(resolvedStdErr),
             ExitCode: CancelledExitCode,
             Duration: duration,
             IsTimedOut: false,
@@ -88,5 +88,10 @@ internal readonly record struct ToolExecutionResult(
     public static implicit operator ToolExecutionResult(string output)
     {
         return Success(output, TimeSpan.Zero, stdErr: null);
+    }
+
+    private static string Sanitize(string? value)
+    {
+        return SecretMasker.Mask(value).TrimEnd();
     }
 }

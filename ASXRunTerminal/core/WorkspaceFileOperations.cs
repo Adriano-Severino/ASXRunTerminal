@@ -20,14 +20,17 @@ internal sealed class WorkspaceFileOperations
     private readonly string _workspaceRootDirectory;
     private readonly string _workspaceRootDirectoryWithSeparator;
     private readonly Func<WorkspaceDestructiveOperation, bool> _destructiveOperationConfirmation;
+    private readonly WorkspaceFilePermissionPolicy _permissionPolicy;
 
     public WorkspaceFileOperations(
         string workspaceRootDirectory,
-        Func<WorkspaceDestructiveOperation, bool>? destructiveOperationConfirmation = null)
+        Func<WorkspaceDestructiveOperation, bool>? destructiveOperationConfirmation = null,
+        WorkspaceFilePermissionPolicy? permissionPolicy = null)
     {
         _workspaceRootDirectory = ResolveWorkspaceRootDirectory(workspaceRootDirectory);
         _workspaceRootDirectoryWithSeparator = EnsureTrailingDirectorySeparator(_workspaceRootDirectory);
         _destructiveOperationConfirmation = destructiveOperationConfirmation ?? (_ => true);
+        _permissionPolicy = permissionPolicy ?? WorkspaceFilePermissionPolicy.AllowAll;
     }
 
     public string WorkspaceRootDirectoryPath => _workspaceRootDirectory;
@@ -37,6 +40,7 @@ internal sealed class WorkspaceFileOperations
         EnsureFilePathArgument(path, nameof(path));
 
         var resolvedPath = ResolveWorkspacePath(path, nameof(path));
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Read, resolvedPath);
         if (Directory.Exists(resolvedPath))
         {
             throw new InvalidOperationException(
@@ -59,6 +63,7 @@ internal sealed class WorkspaceFileOperations
         EnsureFilePathArgument(path, nameof(path));
 
         var resolvedPath = ResolveWorkspacePath(path, nameof(path));
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Create, resolvedPath);
         if (Directory.Exists(resolvedPath))
         {
             throw new InvalidOperationException(
@@ -85,6 +90,7 @@ internal sealed class WorkspaceFileOperations
         EnsureFilePathArgument(path, nameof(path));
 
         var resolvedPath = ResolveWorkspacePath(path, nameof(path));
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Edit, resolvedPath);
         if (Directory.Exists(resolvedPath))
         {
             throw new InvalidOperationException(
@@ -105,6 +111,8 @@ internal sealed class WorkspaceFileOperations
     {
         var resolvedSourcePath = ResolveWorkspacePath(sourcePath, nameof(sourcePath));
         var resolvedDestinationPath = ResolveWorkspacePath(destinationPath, nameof(destinationPath));
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Copy, resolvedSourcePath);
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Copy, resolvedDestinationPath);
 
         ValidateDistinctPaths(
             resolvedSourcePath,
@@ -142,6 +150,8 @@ internal sealed class WorkspaceFileOperations
     {
         var resolvedSourcePath = ResolveWorkspacePath(sourcePath, nameof(sourcePath));
         var resolvedDestinationPath = ResolveWorkspacePath(destinationPath, nameof(destinationPath));
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Move, resolvedSourcePath);
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Move, resolvedDestinationPath);
 
         ValidateDistinctPaths(
             resolvedSourcePath,
@@ -178,6 +188,7 @@ internal sealed class WorkspaceFileOperations
     public void Delete(string path, bool recursive = false)
     {
         var resolvedPath = ResolveWorkspacePath(path, nameof(path));
+        EnsureOperationAllowed(WorkspaceFilePermissionOperation.Delete, resolvedPath);
 
         if (File.Exists(resolvedPath))
         {
@@ -492,6 +503,16 @@ internal sealed class WorkspaceFileOperations
         return OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
+    }
+
+    internal void EnsureOperationAllowed(
+        WorkspaceFilePermissionOperation operation,
+        string resolvedPath)
+    {
+        _permissionPolicy.EnsureAllowed(
+            operation,
+            _workspaceRootDirectory,
+            resolvedPath);
     }
 
     private void EnsureDestructiveOperationIsConfirmed(WorkspaceDestructiveOperation operation)

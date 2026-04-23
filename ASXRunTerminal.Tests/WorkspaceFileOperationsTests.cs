@@ -73,6 +73,29 @@ public sealed class WorkspaceFileOperationsTests
     }
 
     [Fact]
+    public void Create_WhenPermissionPolicyDeniesPath_ThrowsUnauthorizedAccessException()
+    {
+        var root = CreateTemporaryDirectory();
+        var policy = new WorkspaceFilePermissionPolicy(
+            defaultMode: WorkspacePermissionDefaultMode.Deny,
+            rules: new Dictionary<WorkspaceFilePermissionOperation, WorkspaceFilePermissionRule>
+            {
+                [WorkspaceFilePermissionOperation.Create] = new WorkspaceFilePermissionRule(
+                    AllowPatterns: ["src/**"],
+                    DenyPatterns: [])
+            });
+        var operations = new WorkspaceFileOperations(
+            root,
+            permissionPolicy: policy);
+
+        var exception = Assert.Throws<UnauthorizedAccessException>(
+            () => operations.Create("docs/new-file.txt", "conteudo"));
+
+        Assert.Contains("nao e permitida", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(Path.Combine(root, "docs", "new-file.txt")));
+    }
+
+    [Fact]
     public void Edit_WhenFileExists_OverwritesContent()
     {
         var root = CreateTemporaryDirectory();
@@ -300,6 +323,29 @@ public sealed class WorkspaceFileOperationsTests
             () => operations.Delete("."));
 
         Assert.Contains("raiz do workspace", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Delete_WhenPermissionPolicyDeniesPath_ThrowsUnauthorizedAccessException()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "protected/secret.txt", "sigilo");
+        var policy = new WorkspaceFilePermissionPolicy(
+            rules: new Dictionary<WorkspaceFilePermissionOperation, WorkspaceFilePermissionRule>
+            {
+                [WorkspaceFilePermissionOperation.Delete] = new WorkspaceFilePermissionRule(
+                    AllowPatterns: ["**"],
+                    DenyPatterns: ["protected/**"])
+            });
+        var operations = new WorkspaceFileOperations(
+            root,
+            permissionPolicy: policy);
+
+        var exception = Assert.Throws<UnauthorizedAccessException>(
+            () => operations.Delete("protected/secret.txt"));
+
+        Assert.Contains("delete", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(Path.Combine(root, "protected", "secret.txt")));
     }
 
     private static string CreateTemporaryDirectory()

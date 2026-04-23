@@ -446,13 +446,15 @@ internal sealed class McpStdioClient : IMcpClient
         Exception? innerException = null)
     {
         var standardError = connection.GetStandardError();
-        var messageWithStandardError = string.IsNullOrWhiteSpace(standardError)
+        var sanitizedStandardError = SecretMasker.Mask(standardError);
+        var messageWithStandardError = string.IsNullOrWhiteSpace(sanitizedStandardError)
             ? message
-            : $"{message} stderr: {standardError.Trim()}";
+            : $"{message} stderr: {sanitizedStandardError.Trim()}";
+        var sanitizedMessage = SecretMasker.Mask(messageWithStandardError);
 
         return innerException is null
-            ? new InvalidOperationException(messageWithStandardError)
-            : new InvalidOperationException(messageWithStandardError, innerException);
+            ? new InvalidOperationException(sanitizedMessage)
+            : new InvalidOperationException(sanitizedMessage, innerException);
     }
 
     private void ThrowIfTransportFailed()

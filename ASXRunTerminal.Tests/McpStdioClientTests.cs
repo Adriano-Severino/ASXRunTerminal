@@ -136,6 +136,30 @@ public sealed class McpStdioClientTests
     }
 
     [Fact]
+    public async Task SendRequestAsync_MasksSensitiveData_FromStderrWhenTransportFails()
+    {
+        await using var context = new InMemoryMcpConnectionContext(
+            standardError: "token=abc123");
+        await using IMcpClient client = CreateClient(context);
+
+        var serverTask = Task.Run(async () =>
+        {
+            using var request = await McpMessageFraming.ReadMessageAsync(context.ServerInput);
+            Assert.NotNull(request);
+            await context.ServerOutput.DisposeAsync();
+        });
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.SendRequestAsync(
+                method: "tools/list",
+                timeout: TimeSpan.FromSeconds(5)));
+
+        Assert.DoesNotContain("abc123", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("token=***", exception.Message, StringComparison.Ordinal);
+        await serverTask;
+    }
+
+    [Fact]
     public async Task SendNotificationAsync_WritesJsonRpcNotificationWithoutId()
     {
         await using var context = new InMemoryMcpConnectionContext();

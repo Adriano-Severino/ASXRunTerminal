@@ -55,7 +55,8 @@ internal static class ConsoleLogger
         }
 
         var style = isError ? designSystem.ErrorStyle : designSystem.InfoStyle;
-        var formattedMessage = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {message}";
+        var sanitizedMessage = SecretMasker.Mask(message);
+        var formattedMessage = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [{level}] {sanitizedMessage}";
         output.WriteLine(renderer.Render(formattedMessage, style));
     }
 }

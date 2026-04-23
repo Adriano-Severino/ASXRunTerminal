@@ -172,6 +172,38 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_AskCommand_RetriesPromptExecutor_WhenTransientFailureOccursBeforeStreaming()
+    {
+        var attempts = 0;
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            (_, _, cancellationToken) => StreamPromptWithTransientFailure(cancellationToken),
+            "ask",
+            "retentativa");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(2, attempts);
+        Assert.Contains("Resposta apos retry", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+
+        return;
+
+        async IAsyncEnumerable<string> StreamPromptWithTransientFailure(
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            attempts++;
+
+            if (attempts == 1)
+            {
+                throw new TimeoutException("timeout transitorio");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return "Resposta apos retry";
+            await Task.CompletedTask;
+        }
+    }
+
+    [Fact]
     public void Main_AskCommand_WithDiffStream_WritesDiffStateWithDetectionMessage()
     {
         var result = ExecuteMainWithStreamingExecutor(
@@ -542,6 +574,27 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_DoctorCommand_RetriesHealthcheck_WhenFirstAttemptReturnsUnhealthy()
+    {
+        var attempts = 0;
+        var result = ExecuteMainWithHealthcheck(
+            _ =>
+            {
+                attempts++;
+                return Task.FromResult(
+                    attempts == 1
+                        ? OllamaHealthcheckResult.Unhealthy("Conexao recusada.")
+                        : OllamaHealthcheckResult.Healthy("0.6.5"));
+            },
+            "doctor");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(2, attempts);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Ollama disponivel. Versao: 0.6.5.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
     public void Main_DoctorCommand_WithExtraArguments_ReturnsInvalidArguments_AndWritesError()
     {
         var result = ExecuteMain("doctor", "extra");
@@ -598,6 +651,56 @@ public sealed class ProgramMainTests
         Assert.Contains("[ERROR] Nao foi possivel executar o comando. O comando 'models' nao aceita argumentos adicionais.", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun models.", result.StdErr);
         Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_ModelsCommand_RetriesExecutor_WhenTransientFailureOccurs()
+    {
+        var attempts = 0;
+        var models = new[]
+        {
+            new OllamaLocalModel("qwen3.5:4b")
+        };
+
+        var result = ExecuteMainWithModels(
+            _ =>
+            {
+                attempts++;
+                if (attempts == 1)
+                {
+                    throw new TimeoutException("timeout transitorio");
+                }
+
+                return Task.FromResult<IReadOnlyList<OllamaLocalModel>>(models);
+            },
+            "models");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(2, attempts);
+        Assert.Contains("- qwen3.5:4b", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_ChatCommand_WithInteractiveModelsCommand_OpensCircuitBreaker_AfterConsecutiveTransientFailures()
+    {
+        var attempts = 0;
+        var result = ExecuteMainWithInputAndModels(
+            "/models\n/models\n/exit\n",
+            _ =>
+            {
+                attempts++;
+                throw new TimeoutException("timeout transitorio");
+            },
+            "chat");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(3, attempts);
+        Assert.Contains(
+            "Circuit breaker aberto para 'Ollama/models'.",
+            result.StdErr,
+            StringComparison.Ordinal);
+        Assert.Contains("[INFO] Modo interativo encerrado.", result.StdOut);
     }
 
     [Fact]
@@ -722,6 +825,107 @@ public sealed class ProgramMainTests
             Assert.Contains("- modo-dry-run: nao", result.StdOut);
             Assert.Contains("- alteracoes-aplicadas: 1", result.StdOut);
             Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WhenWorkspacePolicyDeniesEdit_ReturnsRuntimeError_AndKeepsFile()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var policyDirectoryPath = Path.Combine(workspaceRootDirectory, UserConfigFile.ConfigDirectoryName);
+        var policyFilePath = Path.Combine(
+            policyDirectoryPath,
+            WorkspacePermissionPolicyFile.WorkspacePermissionPolicyFileName);
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            Directory.CreateDirectory(policyDirectoryPath);
+            File.WriteAllText(targetFilePath, "linha 1\nlinha 2");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("edit", "src/Program.cs", "linha 1\nlinha 2 atualizada", null)));
+            File.WriteAllText(
+                policyFilePath,
+                """
+                {
+                  "defaultMode": "deny",
+                  "edit": {
+                    "allow": ["tests/**"]
+                  }
+                }
+                """);
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMain("patch", patchFilePath);
+
+            Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+            Assert.Equal("linha 1\nlinha 2", File.ReadAllText(targetFilePath));
+            Assert.Contains("[INFO] Aplicando patch de workspace.", result.StdOut);
+            Assert.Contains("Nao foi possivel aplicar o patch informado.", result.StdErr);
+            Assert.Contains("nao e permitida", result.StdErr, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_PatchCommand_WithDryRun_WhenWorkspacePolicyDeniesEdit_ReturnsRuntimeError_AndKeepsFile()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var targetFilePath = Path.Combine(workspaceRootDirectory, "src", "Program.cs");
+        var patchFilePath = Path.Combine(workspaceRootDirectory, "patch.json");
+        var policyDirectoryPath = Path.Combine(workspaceRootDirectory, UserConfigFile.ConfigDirectoryName);
+        var policyFilePath = Path.Combine(
+            policyDirectoryPath,
+            WorkspacePermissionPolicyFile.WorkspacePermissionPolicyFileName);
+        var originalDirectory = Directory.GetCurrentDirectory();
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(nestedDirectory);
+            Directory.CreateDirectory(policyDirectoryPath);
+            File.WriteAllText(targetFilePath, "linha 1\nlinha 2");
+            File.WriteAllText(
+                patchFilePath,
+                BuildPatchRequestFileContent(
+                    ("edit", "src/Program.cs", "linha 1\nlinha 2 atualizada", null)));
+            File.WriteAllText(
+                policyFilePath,
+                """
+                {
+                  "defaultMode": "deny",
+                  "edit": {
+                    "allow": ["tests/**"]
+                  }
+                }
+                """);
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMain("patch", "--dry-run", patchFilePath);
+
+            Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+            Assert.Equal("linha 1\nlinha 2", File.ReadAllText(targetFilePath));
+            Assert.Contains("Nao foi possivel aplicar o patch informado.", result.StdErr);
+            Assert.Contains("nao e permitida", result.StdErr, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -1147,6 +1351,38 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Testando servidor MCP 'filesystem'.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: conectando.", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: processando.", result.StdOut);
+        Assert.Contains("[INFO] Estado de execucao: concluido. Servidor MCP testado com sucesso.", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_McpTestCommand_RetriesTester_WhenTransientFailureOccurs()
+    {
+        var attempts = 0;
+        var existingServers = new[]
+        {
+            McpServerDefinition.Stdio("filesystem", new McpServerProcessOptions("node"))
+        };
+
+        var result = ExecuteMainWithMcp(
+            () => existingServers,
+            _ => { },
+            (server, _) =>
+            {
+                attempts++;
+                if (attempts == 1)
+                {
+                    throw new TimeoutException($"timeout no servidor {server.Name}");
+                }
+
+                return Task.FromResult(McpServerTestResult.Success("Servidor MCP testado com sucesso."));
+            },
+            "mcp",
+            "test",
+            "filesystem");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(2, attempts);
         Assert.Contains("[INFO] Estado de execucao: concluido. Servidor MCP testado com sucesso.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
@@ -1673,6 +1909,19 @@ public sealed class ProgramMainTests
         Assert.Contains("[FAIL]", result.StdErr);
         Assert.Contains("[ERROR] Nao foi possivel concluir a execucao. Ocorreu um erro interno: falha simulada", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Tente novamente. Se o problema persistir, revise os logs acima.", result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AskCommand_WhenPromptExecutorFailsWithSensitiveData_MasksSecretInLogs()
+    {
+        var result = ExecuteMainWithExecutor(
+            _ => throw new InvalidOperationException("falha simulada token=abc123"),
+            "ask",
+            "teste");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.DoesNotContain("abc123", result.StdErr, StringComparison.Ordinal);
+        Assert.Contains("token=***", result.StdErr, StringComparison.Ordinal);
     }
 
     [Fact]

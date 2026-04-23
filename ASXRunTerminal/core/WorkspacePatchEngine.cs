@@ -97,8 +97,12 @@ internal sealed class WorkspacePatchEngine
     private readonly string _workspaceRootDirectory;
     private readonly string _workspaceRootDirectoryWithSeparator;
 
-    public WorkspacePatchEngine(string workspaceRootDirectory)
-        : this(new WorkspaceFileOperations(workspaceRootDirectory))
+    public WorkspacePatchEngine(
+        string workspaceRootDirectory,
+        WorkspaceFilePermissionPolicy? permissionPolicy = null)
+        : this(new WorkspaceFileOperations(
+            workspaceRootDirectory,
+            permissionPolicy: permissionPolicy))
     {
     }
 
@@ -205,6 +209,10 @@ internal sealed class WorkspacePatchEngine
         string relativePath,
         string resolvedPath)
     {
+        _fileOperations.EnsureOperationAllowed(
+            WorkspaceFilePermissionOperation.Create,
+            resolvedPath);
+
         if (Directory.Exists(resolvedPath))
         {
             throw new InvalidOperationException(
@@ -238,6 +246,10 @@ internal sealed class WorkspacePatchEngine
         string relativePath,
         string resolvedPath)
     {
+        _fileOperations.EnsureOperationAllowed(
+            WorkspaceFilePermissionOperation.Edit,
+            resolvedPath);
+
         if (Directory.Exists(resolvedPath))
         {
             throw new InvalidOperationException(
@@ -281,6 +293,10 @@ internal sealed class WorkspacePatchEngine
         string relativePath,
         string resolvedPath)
     {
+        _fileOperations.EnsureOperationAllowed(
+            WorkspaceFilePermissionOperation.Delete,
+            resolvedPath);
+
         if (Directory.Exists(resolvedPath))
         {
             throw new InvalidOperationException(
