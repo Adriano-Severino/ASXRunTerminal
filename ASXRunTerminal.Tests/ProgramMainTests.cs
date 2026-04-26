@@ -45,6 +45,7 @@ public sealed class ProgramMainTests
         Assert.Contains("Opcoes:", result.StdOut);
         Assert.Contains("Comandos:", result.StdOut);
         Assert.Contains("ask \"prompt\"", result.StdOut);
+        Assert.Contains("asxrun agent [--model <modelo>] \"objetivo\"", result.StdOut);
         Assert.Contains("asxrun chat", result.StdOut);
         Assert.Contains("asxrun doctor", result.StdOut);
         Assert.Contains("asxrun models", result.StdOut);
@@ -435,6 +436,100 @@ public sealed class ProgramMainTests
         Assert.Contains("Modelo: qwen3.5:4b | Prompt: gerar smoke test", result.StdOut);
         Assert.Contains("[INFO] Estado de execucao: concluido.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithObjective_ReturnsSuccess_AndWritesAutonomousPrompt()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            "agent",
+            "planejar",
+            "migracao",
+            "de",
+            "dados");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Iniciando modo agente autonomo por objetivo.", result.StdOut);
+        Assert.Contains("Modelo: <padrao> | Prompt: [MODO: AGENTE AUTONOMO]", result.StdOut);
+        Assert.Contains("[OBJETIVO]", result.StdOut);
+        Assert.Contains("planejar migracao de dados", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithModelFlag_ReturnsSuccess_AndForwardsModelToExecutor()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            "agent",
+            "--model=qwen2.5-coder:7b",
+            "criar",
+            "plano");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Iniciando modo agente autonomo por objetivo.", result.StdOut);
+        Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: [MODO: AGENTE AUTONOMO]", result.StdOut);
+        Assert.Contains("criar plano", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithModelFlagSeparated_ReturnsSuccess_AndForwardsModelToExecutor()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            "agent",
+            "--model",
+            "qwen2.5-coder:7b",
+            "criar",
+            "plano");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Iniciando modo agente autonomo por objetivo.", result.StdOut);
+        Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: [MODO: AGENTE AUTONOMO]", result.StdOut);
+        Assert.Contains("criar plano", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithDuplicateModelFlag_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain(
+            "agent",
+            "--model",
+            "qwen2.5-coder:7b",
+            "--model",
+            "llama3.2:latest",
+            "gerar",
+            "plano");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. A opcao '--model' foi informada mais de uma vez no comando 'agent'.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun agent --model qwen3.5:4b \"seu objetivo\".", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithoutObjective_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("agent");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. Voce precisa informar um objetivo para o comando 'agent'.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun agent \"seu objetivo\".", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithEmptyObjective_ReturnsInvalidArguments_AndWritesError()
+    {
+        var result = ExecuteMain("agent", "   ");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains("[ERROR] Nao foi possivel executar o comando. O objetivo informado para o comando 'agent' esta vazio.", result.StdErr);
+        Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun agent \"seu objetivo\".", result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
     }
 
     [Fact]
@@ -2109,6 +2204,38 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_ResumeCommand_WhenInterruptedAgentSessionExists_RestartsLatestSession()
+    {
+        var checkpoints = new[]
+        {
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 2, 0, TimeSpan.Zero),
+                SessionId: "sessao-agent-interrompida",
+                Command: "agent",
+                Stage: "error",
+                Status: ExecutionCheckpointStatus.Failed,
+                Prompt: "otimizar pipeline de deploy",
+                Model: "qwen2.5-coder:7b",
+                SkillName: null,
+                Detail: "falha")
+        };
+
+        var result = ExecuteMainWithCheckpoints(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            () => checkpoints,
+            static _ => { },
+            "resume");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("Retomando sessao 'sessao-agent-interrompida' do comando 'agent' a partir da etapa 'error'.", result.StdOut);
+        Assert.Contains("[INFO] Iniciando modo agente autonomo por objetivo.", result.StdOut);
+        Assert.Contains("Modelo: qwen2.5-coder:7b | Prompt: [MODO: AGENTE AUTONOMO]", result.StdOut);
+        Assert.Contains("[OBJETIVO]", result.StdOut);
+        Assert.Contains("otimizar pipeline de deploy", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
     public void Main_ResumeCommand_WhenNoInterruptedSessionExists_ReturnsRuntimeError()
     {
         var checkpoints = new[]
@@ -2132,7 +2259,7 @@ public sealed class ProgramMainTests
             "resume");
 
         Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
-        Assert.Contains("Nenhuma sessao interrompida de ask/skill foi encontrada para retomar.", result.StdErr);
+        Assert.Contains("Nenhuma sessao interrompida de ask/agent/skill foi encontrada para retomar.", result.StdErr);
     }
 
     [Fact]

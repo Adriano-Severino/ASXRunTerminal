@@ -16,13 +16,14 @@ O ASXRunTerminal CLI foi desenhado para entregar uma experiencia parecida com um
 Funcionalidades ja disponiveis:
 
 - `ask`: executa prompt unico com streaming de resposta;
+- `agent`: inicia modo agente autonomo orientado por objetivo;
 - `chat`: modo interativo no terminal;
 - `doctor`: valida disponibilidade do Ollama;
 - `models`: lista modelos locais do Ollama;
 - `context`: inspeciona resumo do workspace atual;
 - `patch`: aplica mudancas de arquivo por JSON e exibe diff unificado (com suporte a `--dry-run`);
 - `history`: mostra e limpa historico local;
-- `resume`: retoma a ultima sessao interrompida de `ask/skill` com checkpoints por etapa;
+- `resume`: retoma a ultima sessao interrompida de `ask/agent/skill` com checkpoints por etapa;
 - `mcp list/add/remove/test`: gerencia servidores MCP locais/remotos;
 - `config get/set`: le e atualiza configuracao do usuario;
 - `skills`, `skills show`, `skill`: skills padrao para tarefas tecnicas.
@@ -260,6 +261,18 @@ asxrun ask "Explique o padrao repository em C#."
 asxrun ask --model qwen2.5-coder:7b "Gerar teste unitario para parser de argumentos."
 ```
 
+### Modo agente autonomo por objetivo
+
+```bash
+asxrun agent "Planejar e executar migracao incremental de banco com rollback seguro."
+```
+
+Opcionalmente, use modelo explicito:
+
+```bash
+asxrun agent --model qwen2.5-coder:7b "Mapear riscos e propor plano de execucao para modernizacao de API."
+```
+
 ### Modo interativo
 
 ```bash
@@ -340,7 +353,7 @@ asxrun history --clear
 
 ## Retomada de Sessao
 
-Retomar a sessao interrompida mais recente de `ask/skill`:
+Retomar a sessao interrompida mais recente de `ask/agent/skill`:
 
 ```bash
 asxrun resume

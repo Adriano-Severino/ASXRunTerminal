@@ -28,6 +28,7 @@ internal static class Program
     private static readonly string[] CliCommandSuggestions =
     [
         "ask",
+        "agent",
         "chat",
         "doctor",
         "models",
@@ -469,6 +470,16 @@ internal static class Program
                     executionCheckpointLoader);
             }
 
+            if (parseResult.RunAgent && parseResult.AgentObjective is not null)
+            {
+                return ExecuteAgent(
+                    parseResult.AgentObjective,
+                    parseResult.SelectedModel,
+                    fallbackPromptExecutor,
+                    cancelSignalRegistration,
+                    executionCheckpointAppender);
+            }
+
             if (parseResult.AskPrompt is not null)
             {
                 return ExecuteAsk(
@@ -608,6 +619,11 @@ internal static class Program
 
     private static ParseResult ParseArguments(string[] args)
     {
+        if (args.Length > 0 && string.Equals(args[0], "agent", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseAgentArguments(args);
+        }
+
         if (args.Length > 0 && string.Equals(args[0], "ask", StringComparison.OrdinalIgnoreCase))
         {
             return ParseAskArguments(args);
@@ -1761,6 +1777,73 @@ internal static class Program
             Error: null);
     }
 
+    private static ParseResult ParseAgentArguments(string[] args)
+    {
+        var commandArguments = args.Skip(1).ToArray();
+        var optionError = TryExtractModelOption(
+            commandArguments,
+            commandName: "agent",
+            usageExample: $"{CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".",
+            out var selectedModel,
+            out var remainingArguments);
+
+        if (optionError is CliFriendlyError error)
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: error);
+        }
+
+        if (remainingArguments.Count == 0)
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: CliFriendlyError.InvalidArguments(
+                    detail: "Voce precisa informar um objetivo para o comando 'agent'.",
+                    suggestion: $"Exemplo: {CliName} agent \"seu objetivo\"."));
+        }
+
+        var objective = string.Join(' ', remainingArguments).Trim();
+        if (string.IsNullOrWhiteSpace(objective))
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: CliFriendlyError.InvalidArguments(
+                    detail: "O objetivo informado para o comando 'agent' esta vazio.",
+                    suggestion: $"Exemplo: {CliName} agent \"seu objetivo\"."));
+        }
+
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: selectedModel,
+            Error: null,
+            RunAgent: true,
+            AgentObjective: objective);
+    }
+
     private static ParseResult ParseChatArguments(string[] args)
     {
         var commandArguments = args.Skip(1).ToArray();
@@ -2114,6 +2197,7 @@ internal static class Program
         Console.WriteLine("Uso:");
         Console.WriteLine($"  {CliName} [opcao]");
         Console.WriteLine($"  {CliName} ask [--model <modelo>] \"prompt\"");
+        Console.WriteLine($"  {CliName} agent [--model <modelo>] \"objetivo\"");
         Console.WriteLine($"  {CliName} chat [--model <modelo>]");
         Console.WriteLine($"  {CliName} doctor");
         Console.WriteLine($"  {CliName} models");
@@ -2137,12 +2221,14 @@ internal static class Program
         Console.WriteLine("Opcoes:");
         Console.WriteLine("  -h, --help       Exibe ajuda.");
         Console.WriteLine("  -v, --version    Exibe a versao.");
-        Console.WriteLine($"  --model <nome>   Seleciona o modelo Ollama para 'ask' e 'chat' (padrao: {OllamaModelDefaults.DefaultModel}).");
+        Console.WriteLine($"  --model <nome>   Seleciona o modelo Ollama para 'ask', 'agent', 'chat' e 'skill' (padrao: {OllamaModelDefaults.DefaultModel}).");
         Console.WriteLine($"  {OllamaModelDefaults.DefaultModelEnvironmentVariable}=<nome>");
         Console.WriteLine("                   Sobrescreve o modelo padrao quando --model nao e informado.");
         Console.WriteLine();
         Console.WriteLine("Comandos:");
         Console.WriteLine("  ask \"prompt\"    Executa um prompt unico.");
+        Console.WriteLine("  agent \"objetivo\" Inicia o modo agente autonomo orientado por objetivo.");
+        Console.WriteLine("                   O prompt e expandido com diretrizes de planejamento e verificacao.");
         Console.WriteLine("  chat             Inicia o modo interativo.");
         Console.WriteLine("                   Comandos no chat: /help, /clear, /models, /tools, /exit.");
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
@@ -2153,7 +2239,7 @@ internal static class Program
         Console.WriteLine("                   Mudancas destrutivas (delete) exigem confirmacao explicita.");
         Console.WriteLine("                   Cada execucao registra trilha de auditoria local por sessao.");
         Console.WriteLine("  history          Exibe ou limpa o historico local de prompts.");
-        Console.WriteLine("  resume           Retoma a ultima sessao interrompida de ask/skill.");
+        Console.WriteLine("  resume           Retoma a ultima sessao interrompida de ask/agent/skill.");
         Console.WriteLine("                   Opcional: informe um session-id especifico para retomar.");
         Console.WriteLine("  mcp              Gerencia servidores MCP locais/remotos e executa teste de conectividade.");
         Console.WriteLine("  config           Le e atualiza configuracoes locais do usuario.");
@@ -2195,6 +2281,34 @@ internal static class Program
             executionCheckpointAppender: executionCheckpointAppender);
         var wasCancelled = ExecutePrompt(
             prompt,
+            model,
+            promptExecutor,
+            cancelSignalRegistration,
+            checkpointContext);
+        return wasCancelled
+            ? (int)CliExitCode.Cancelled
+            : (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteAgent(
+        string objective,
+        string? model,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+    {
+        ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+
+        ConsoleLogger.Info("Iniciando modo agente autonomo por objetivo.");
+        var promptWithAgentMode = BuildAgentPrompt(objective);
+        var checkpointContext = CreatePromptCheckpointContext(
+            command: "agent",
+            prompt: objective,
+            model: model,
+            skillName: null,
+            executionCheckpointAppender: executionCheckpointAppender);
+        var wasCancelled = ExecutePrompt(
+            promptWithAgentMode,
             model,
             promptExecutor,
             cancelSignalRegistration,
@@ -2280,8 +2394,8 @@ internal static class Program
             if (selectedCheckpoint is null)
             {
                 var missingError = CliFriendlyError.Runtime(
-                    detail: "Nenhuma sessao interrompida de ask/skill foi encontrada para retomar.",
-                    suggestion: $"Execute '{CliName} ask \"seu prompt\"' ou '{CliName} skill <nome> \"seu prompt\"' e use '{CliName} resume' se houver interrupcao.");
+                    detail: "Nenhuma sessao interrompida de ask/agent/skill foi encontrada para retomar.",
+                    suggestion: $"Execute '{CliName} ask \"seu prompt\"', '{CliName} agent \"seu objetivo\"' ou '{CliName} skill <nome> \"seu prompt\"' e use '{CliName} resume' se houver interrupcao.");
                 WriteFriendlyError(missingError);
                 return (int)missingError.ExitCode;
             }
@@ -2303,6 +2417,16 @@ internal static class Program
         if (string.Equals(checkpointToResume.Command, "ask", StringComparison.OrdinalIgnoreCase))
         {
             return ExecuteAsk(
+                checkpointToResume.Prompt,
+                checkpointToResume.Model,
+                promptExecutor,
+                cancelSignalRegistration,
+                executionCheckpointAppender);
+        }
+
+        if (string.Equals(checkpointToResume.Command, "agent", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExecuteAgent(
                 checkpointToResume.Prompt,
                 checkpointToResume.Model,
                 promptExecutor,
@@ -2345,6 +2469,11 @@ internal static class Program
         }
 
         if (string.Equals(checkpoint.Command, "ask", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.Equals(checkpoint.Command, "agent", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -3772,6 +3901,21 @@ internal static class Program
             """;
     }
 
+    private static string BuildAgentPrompt(string objective)
+    {
+        return
+            $"""
+            [MODO: AGENTE AUTONOMO]
+            Atue como um desenvolvedor senior com foco em entrega.
+            Siga o ciclo: planejar -> executar -> verificar -> refinar.
+            Explique premissas, riscos e proximos passos de forma objetiva.
+            Quando faltar contexto, informe claramente e proponha a acao mais util.
+
+            [OBJETIVO]
+            {objective}
+            """;
+    }
+
     private static PromptExecutionCheckpointContext CreatePromptCheckpointContext(
         string command,
         string prompt,
@@ -4955,5 +5099,7 @@ internal static class Program
         string? SkillPrompt = null,
         bool RunContext = false,
         string? PatchRequestFilePath = null,
-        bool PatchDryRun = false);
+        bool PatchDryRun = false,
+        bool RunAgent = false,
+        string? AgentObjective = null);
 }

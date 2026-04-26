@@ -39,6 +39,16 @@ public sealed class ChatAutocompleteEngineTests
     }
 
     [Fact]
+    public void ApplyNextCompletion_WithAgentCommandPrefix_CompletesCommand()
+    {
+        var engine = CreateEngine();
+
+        var completedInput = engine.ApplyNextCompletion("asxrun ag");
+
+        Assert.Equal("asxrun agent", completedInput);
+    }
+
+    [Fact]
     public void ApplyNextCompletion_WithCliOptionPrefix_CompletesOption()
     {
         var engine = CreateEngine();
@@ -105,6 +115,7 @@ public sealed class ChatAutocompleteEngineTests
             cliCommandCandidates:
             [
                 "ask",
+                "agent",
                 "chat",
                 "doctor",
                 "models",
