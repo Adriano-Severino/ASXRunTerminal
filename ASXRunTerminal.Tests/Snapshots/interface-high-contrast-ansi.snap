@@ -1,0 +1,19 @@
+\u001b[1;97m============== ASXRunTerminal CLI ==============
+preview | theme=high-contrast | ansi=on
+================================================\u001b[0m
+\u001b[1;97m-------------------- STATUS --------------------\u001b[0m
+\u001b[1;96m[CONN] conectando | [CONN] .\u001b[0m
+\u001b[1;94m[TOOL] tool call | [TOOL] >>\u001b[0m
+\u001b[1;94m[WORK] processando | [WORK] -\u001b[0m
+\u001b[1;93m[DIFF] diff | [DIFF] +\u001b[0m
+\u001b[1;92m[DONE] concluido | [DONE] *\u001b[0m
+\u001b[1;91m[FAIL] erro | [FAIL] x\u001b[0m
+\u001b[1;97m------------------- RESPONSE -------------------\u001b[0m
+Antes
+\u001b[1;97m```csharp\u001b[0m
+\u001b[1;96mvar total = 1;\u001b[0m
+\u001b[1;97m```\u001b[0m
+Depois
+\u001b[1;97m```python\u001b[0m
+\u001b[1;92mprint('ok')\u001b[0m
+\u001b[1;97m```\u001b[0m

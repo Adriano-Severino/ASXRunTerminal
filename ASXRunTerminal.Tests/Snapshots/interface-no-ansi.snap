@@ -1,0 +1,19 @@
+============== ASXRunTerminal CLI ==============
+preview | theme=dark | ansi=off
+================================================
+-------------------- STATUS --------------------
+[CONN] conectando | [CONN] .
+[TOOL] tool call | [TOOL] >>
+[WORK] processando | [WORK] -
+[DIFF] diff | [DIFF] +
+[DONE] concluido | [DONE] *
+[FAIL] erro | [FAIL] x
+------------------- RESPONSE -------------------
+Antes
+```csharp
+var total = 1;
+```
+Depois
+```python
+print('ok')
+```

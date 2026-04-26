@@ -30,6 +30,15 @@ Funcionalidades ja disponiveis:
 Versao atual: `0.1.0`.
 Historico de mudancas: `CHANGELOG.md`.
 
+## Documentacao Tecnica
+
+- Arquitetura de plugins/ferramentas e fluxo de contexto:
+  `docs/architecture/plugins-tools-context-flow.md`
+- Guia de seguranca operacional (uso local e corporativo):
+  `docs/operations/operational-security-guide.md`
+- Playbook de troubleshooting (MCP, shell, Ollama, permissoes, encoding):
+  `docs/operations/troubleshooting-playbook.md`
+
 ## Pre-requisitos
 
 1. .NET SDK 10.0 (para compilar e executar o projeto `net10.0`).
@@ -457,3 +466,5 @@ dotnet test ASXRunTerminal.slnx -c Debug
    - execute `asxrun --help` e revise a sintaxe.
 3. nenhum modelo listado em `models`:
    - rode `ollama pull <modelo>` e tente novamente.
+4. problemas de MCP, shell, permissoes ou encoding:
+   - consulte `docs/operations/troubleshooting-playbook.md`.

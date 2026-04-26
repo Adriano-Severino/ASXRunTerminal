@@ -1,0 +1,10 @@
+theme=high-contrast
+typography=Cascadia Mono, Consolas, Menlo, monospace | tab=4
+TextPrimary | code=97 | normal=\u001b[97mTextPrimary\u001b[0m | bold=\u001b[1;97mTextPrimary\u001b[0m | dim=\u001b[2;97mTextPrimary\u001b[0m
+TextMuted | code=97 | normal=\u001b[97mTextMuted\u001b[0m | bold=\u001b[1;97mTextMuted\u001b[0m | dim=\u001b[2;97mTextMuted\u001b[0m
+Accent | code=94 | normal=\u001b[94mAccent\u001b[0m | bold=\u001b[1;94mAccent\u001b[0m | dim=\u001b[2;94mAccent\u001b[0m
+Info | code=96 | normal=\u001b[96mInfo\u001b[0m | bold=\u001b[1;96mInfo\u001b[0m | dim=\u001b[2;96mInfo\u001b[0m
+Success | code=92 | normal=\u001b[92mSuccess\u001b[0m | bold=\u001b[1;92mSuccess\u001b[0m | dim=\u001b[2;92mSuccess\u001b[0m
+Warning | code=93 | normal=\u001b[93mWarning\u001b[0m | bold=\u001b[1;93mWarning\u001b[0m | dim=\u001b[2;93mWarning\u001b[0m
+Error | code=91 | normal=\u001b[91mError\u001b[0m | bold=\u001b[1;91mError\u001b[0m | dim=\u001b[2;91mError\u001b[0m
+Border | code=97 | normal=\u001b[97mBorder\u001b[0m | bold=\u001b[1;97mBorder\u001b[0m | dim=\u001b[2;97mBorder\u001b[0m

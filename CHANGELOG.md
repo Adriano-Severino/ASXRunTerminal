@@ -11,6 +11,8 @@ O formato segue o Keep a Changelog e o versionamento segue Semantic Versioning.
 - Comandos interativos no modo `chat`: `/help`, `/clear`, `/models`, `/tools` e `/exit`.
 - Guardrails por workspace para operacoes de arquivo via `.asxrun/workspace-permissions.json`, aplicados no comando `patch` (incluindo `--dry-run`).
 - Camada de resiliencia operacional com retries e circuit breaker para fluxos de Ollama (`ask/chat`, `doctor`, `models`) e `mcp test`.
+- Guia de seguranca operacional para uso local e corporativo em `docs/operations/operational-security-guide.md`.
+- Playbook de troubleshooting para MCP, shell, Ollama, permissoes e encoding em `docs/operations/troubleshooting-playbook.md`.
 
 ## [0.1.0] - 2026-04-03
 
