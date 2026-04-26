@@ -228,6 +228,36 @@ public sealed class WorkspaceFileOperationsTests
     }
 
     [Fact]
+    public void Move_WhenDirectoryOverwriteConfirmationIsAccepted_ReplacesDestinationAndCapturesMetadata()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "src/nested/file.txt", "origem");
+        CreateFile(root, "dest/legacy.txt", "destino");
+        WorkspaceDestructiveOperation? receivedOperation = null;
+        var operations = new WorkspaceFileOperations(
+            root,
+            operation =>
+            {
+                receivedOperation = operation;
+                return true;
+            });
+
+        operations.Move("src", "dest", overwrite: true);
+
+        var sourcePath = Path.Combine(root, "src");
+        var destinationPath = Path.Combine(root, "dest");
+        Assert.False(Directory.Exists(sourcePath));
+        Assert.False(File.Exists(Path.Combine(destinationPath, "legacy.txt")));
+        Assert.Equal("origem", File.ReadAllText(Path.Combine(destinationPath, "nested", "file.txt")));
+        Assert.True(receivedOperation.HasValue);
+        Assert.Equal(WorkspaceDestructiveOperationKind.MoveOverwriteDirectory, receivedOperation.Value.Kind);
+        Assert.True(receivedOperation.Value.IsRecursive);
+        Assert.Equal(destinationPath, receivedOperation.Value.TargetPath);
+        Assert.Equal(sourcePath, receivedOperation.Value.SourcePath);
+        Assert.Equal(destinationPath, receivedOperation.Value.DestinationPath);
+    }
+
+    [Fact]
     public void Delete_WhenPathIsFile_DeletesFile()
     {
         var root = CreateTemporaryDirectory();
@@ -289,16 +319,49 @@ public sealed class WorkspaceFileOperationsTests
     }
 
     [Fact]
+    public void Delete_WhenDirectoryIsEmpty_RequestsConfirmationWithNonRecursiveOperation()
+    {
+        var root = CreateTemporaryDirectory();
+        Directory.CreateDirectory(Path.Combine(root, "tmp"));
+        WorkspaceDestructiveOperation? receivedOperation = null;
+        var operations = new WorkspaceFileOperations(
+            root,
+            operation =>
+            {
+                receivedOperation = operation;
+                return true;
+            });
+
+        operations.Delete("tmp", recursive: false);
+
+        var expectedPath = Path.Combine(root, "tmp");
+        Assert.False(Directory.Exists(expectedPath));
+        Assert.True(receivedOperation.HasValue);
+        Assert.Equal(WorkspaceDestructiveOperationKind.Delete, receivedOperation.Value.Kind);
+        Assert.False(receivedOperation.Value.IsRecursive);
+        Assert.Equal(expectedPath, receivedOperation.Value.TargetPath);
+    }
+
+    [Fact]
     public void Delete_WhenDirectoryIsNotEmptyWithoutRecursive_Throws()
     {
         var root = CreateTemporaryDirectory();
         CreateFile(root, "tmp/nested/file.txt", "data");
-        var operations = new WorkspaceFileOperations(root);
+        var destructiveOperationRequested = false;
+        var operations = new WorkspaceFileOperations(
+            root,
+            _ =>
+            {
+                destructiveOperationRequested = true;
+                return true;
+            });
 
         var exception = Assert.Throws<InvalidOperationException>(
             () => operations.Delete("tmp"));
 
         Assert.Contains("recursiva", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(destructiveOperationRequested);
+        Assert.True(Directory.Exists(Path.Combine(root, "tmp")));
     }
 
     [Fact]
@@ -346,6 +409,26 @@ public sealed class WorkspaceFileOperationsTests
 
         Assert.Contains("delete", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(Path.Combine(root, "protected", "secret.txt")));
+    }
+
+    [Fact]
+    public void Delete_WhenPathDoesNotExist_DoesNotRequestConfirmation()
+    {
+        var root = CreateTemporaryDirectory();
+        var destructiveOperationRequested = false;
+        var operations = new WorkspaceFileOperations(
+            root,
+            _ =>
+            {
+                destructiveOperationRequested = true;
+                return true;
+            });
+
+        var exception = Assert.Throws<FileNotFoundException>(
+            () => operations.Delete("tmp/missing.txt"));
+
+        Assert.Contains("nao existe", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(destructiveOperationRequested);
     }
 
     private static string CreateTemporaryDirectory()

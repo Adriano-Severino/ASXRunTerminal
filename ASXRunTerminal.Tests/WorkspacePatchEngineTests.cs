@@ -124,6 +124,26 @@ public sealed class WorkspacePatchEngineTests
     }
 
     [Fact]
+    public void Apply_WhenRequestContainsDuplicateCanonicalPath_Throws()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "src/canonical.txt", "conteudo");
+        var engine = new WorkspacePatchEngine(root);
+
+        WorkspacePatchRequest request = new WorkspacePatchRequest(
+            Changes:
+            [
+                (WorkspacePatchChangeKind.Edit, "src/canonical.txt", "novo conteudo"),
+                (WorkspacePatchChangeKind.Delete, "src/../src/canonical.txt", null)
+            ]);
+
+        var exception = Assert.Throws<InvalidOperationException>(
+            () => engine.Apply(request));
+
+        Assert.Contains("multiplas mudancas", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Apply_WhenExpectedContentDoesNotMatch_Throws()
     {
         var root = CreateTemporaryDirectory();
@@ -215,6 +235,65 @@ public sealed class WorkspacePatchEngineTests
         Assert.Contains("+++ /dev/null", result.UnifiedDiff, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Apply_WhenEditDiffExceedsLcsLimit_UsesCoarseDiffFallback()
+    {
+        var root = CreateTemporaryDirectory();
+        var previousContent = BuildSequentialLines("before", 2000);
+        var nextContent = BuildSequentialLines("after", 2000);
+        CreateFile(root, "src/large-diff.txt", previousContent);
+        var engine = new WorkspacePatchEngine(root);
+
+        WorkspacePatchRequest request = new WorkspacePatchRequest(
+            Changes:
+            [
+                (WorkspacePatchChangeKind.Edit, "src/large-diff.txt", nextContent)
+            ],
+            PreviewOnly: true);
+
+        var result = engine.Apply(request);
+
+        var fileResult = Assert.Single(result.Files);
+        Assert.True(fileResult.HasChanges);
+        Assert.Contains("@@ -1,2000 +1,2000 @@", fileResult.UnifiedDiff, StringComparison.Ordinal);
+        Assert.Contains("-before-0001", fileResult.UnifiedDiff, StringComparison.Ordinal);
+        Assert.Contains("+after-0001", fileResult.UnifiedDiff, StringComparison.Ordinal);
+        Assert.DoesNotContain(" before-", fileResult.UnifiedDiff, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Apply_WhenRequestMixesChangedAndNoOpEdits_AggregatesDiffForChangedFileOnly()
+    {
+        var root = CreateTemporaryDirectory();
+        CreateFile(root, "src/changed.txt", "linha 1\nlinha 2");
+        CreateFile(root, "src/noop.txt", "conteudo estavel");
+        var engine = new WorkspacePatchEngine(root);
+
+        WorkspacePatchRequest request = new WorkspacePatchRequest(
+            Changes:
+            [
+                (WorkspacePatchChangeKind.Edit, "src/changed.txt", "linha 1\nlinha 2 alterada"),
+                (WorkspacePatchChangeKind.Edit, "src/noop.txt", "conteudo estavel")
+            ]);
+
+        var result = engine.Apply(request);
+
+        Assert.Equal(1, result.PlannedChangeCount);
+        Assert.Equal(1, result.AppliedChangeCount);
+        Assert.Equal(1, result.SkippedChangeCount);
+        Assert.Equal(2, result.Files.Count);
+
+        var changedFile = result.Files[0];
+        var noOpFile = result.Files[1];
+        Assert.Equal("src/changed.txt", changedFile.Path);
+        Assert.True(changedFile.HasChanges);
+        Assert.Equal("src/noop.txt", noOpFile.Path);
+        Assert.False(noOpFile.HasChanges);
+
+        Assert.Contains("src/changed.txt", result.UnifiedDiff, StringComparison.Ordinal);
+        Assert.DoesNotContain("src/noop.txt", result.UnifiedDiff, StringComparison.Ordinal);
+    }
+
     private static string CreateTemporaryDirectory()
     {
         var directoryPath = Path.Combine(
@@ -241,5 +320,13 @@ public sealed class WorkspacePatchEngineTests
         Directory.CreateDirectory(fileDirectory);
         File.WriteAllText(filePath, content);
         return filePath;
+    }
+
+    private static string BuildSequentialLines(string prefix, int lineCount)
+    {
+        return string.Join(
+            '\n',
+            Enumerable.Range(1, lineCount)
+                .Select(lineNumber => $"{prefix}-{lineNumber:0000}"));
     }
 }
