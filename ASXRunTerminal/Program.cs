@@ -4,6 +4,7 @@ using ASXRunTerminal.Infra;
 using System.Net;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
 namespace ASXRunTerminal;
@@ -3903,6 +3904,9 @@ internal static class Program
 
     private static string BuildAgentPrompt(string objective)
     {
+        var executionPlan = AgentObjectivePlanner.Build(objective);
+        var executionPlanSection = BuildAgentExecutionPlanSection(executionPlan);
+
         return
             $"""
             [MODO: AGENTE AUTONOMO]
@@ -3912,8 +3916,30 @@ internal static class Program
             Quando faltar contexto, informe claramente e proponha a acao mais util.
 
             [OBJETIVO]
-            {objective}
+            {executionPlan.Objective}
+
+            [PLANO DE EXECUCAO POR ETAPAS]
+            {executionPlanSection}
             """;
+    }
+
+    private static string BuildAgentExecutionPlanSection(AgentExecutionPlan executionPlan)
+    {
+        var builder = new StringBuilder();
+
+        foreach (var step in executionPlan.Steps)
+        {
+            if (builder.Length > 0)
+            {
+                builder.AppendLine();
+            }
+
+            builder.AppendLine($"{step.Order}. [{step.Stage}]");
+            builder.AppendLine($"   Acao: {step.Action}");
+            builder.Append($"   Entrega esperada: {step.ExpectedOutput}");
+        }
+
+        return builder.ToString();
     }
 
     private static PromptExecutionCheckpointContext CreatePromptCheckpointContext(

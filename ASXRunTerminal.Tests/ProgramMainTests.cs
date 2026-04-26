@@ -453,7 +453,29 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Iniciando modo agente autonomo por objetivo.", result.StdOut);
         Assert.Contains("Modelo: <padrao> | Prompt: [MODO: AGENTE AUTONOMO]", result.StdOut);
         Assert.Contains("[OBJETIVO]", result.StdOut);
+        Assert.Contains("[PLANO DE EXECUCAO POR ETAPAS]", result.StdOut);
+        Assert.Contains("1. [Mapear contexto e restricoes]", result.StdOut);
+        Assert.Contains("Acao: Planejar migracao de dados.", result.StdOut);
         Assert.Contains("planejar migracao de dados", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithCompositeObjective_WritesDecomposedExecutionPlan()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, model, _) => StreamPromptWithModel(prompt, model),
+            "agent",
+            "planejar",
+            "e",
+            "executar",
+            "migracao",
+            "incremental");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[PLANO DE EXECUCAO POR ETAPAS]", result.StdOut);
+        Assert.Contains("Acao: Planejar.", result.StdOut);
+        Assert.Contains("Acao: Executar migracao incremental.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
 

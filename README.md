@@ -267,6 +267,9 @@ asxrun ask --model qwen2.5-coder:7b "Gerar teste unitario para parser de argumen
 asxrun agent "Planejar e executar migracao incremental de banco com rollback seguro."
 ```
 
+O comando decompoe o objetivo automaticamente em um plano de execucao por etapas
+antes de enviar o prompt ao modelo.
+
 Opcionalmente, use modelo explicito:
 
 ```bash
