@@ -1,6 +1,9 @@
 using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -13,11 +16,76 @@ internal static class Program
 {
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
+    private const string AgentMaxStepsFlag = "--max-steps";
+    private const string AgentMaxTimeFlag = "--max-time";
+    private const string AgentMaxCostFlag = "--max-cost";
+    private const string AgentMaxStepsAliasFlag = "--max_steps";
+    private const string AgentMaxTimeAliasFlag = "--max_time";
+    private const string AgentMaxCostAliasFlag = "--max_cost";
     private const string InteractiveChatPromptPrefix = "> ";
+    private const int AgentAutonomousMaxIterations = 8;
+    private const int AgentAutoCorrectionMaxAttempts = 2;
+    private const string AgentVerificationStatusDone = "done";
+    private const string AgentVerificationStatusRefine = "refine";
+    private const string AgentCodeChangeStatusChanged = "changed";
+    private const string AgentCodeChangeStatusNoChange = "no-change";
+    private const string AgentCodeChangeStatusUnknown = "unknown";
+    private const string AgentLoopCheckpointStage = "agent-loop";
+    private const string AgentLoopCheckpointKind = "agent-loop-resume-v1";
+    private const int AgentPromptContextExcerptMaxCharacters = 2500;
+    private const int AgentValidationOutputExcerptMaxCharacters = 1200;
+    private const int AgentProjectContextSampleLimit = 8;
+    private const int AgentProjectGitHistoryCommitLimit = 5;
+    private const int AgentProjectGitSubjectMaxCharacters = 120;
     private const int ResilienceRetryAttempts = 3;
     private const int ResilienceCircuitFailureThreshold = 3;
     private static readonly TimeSpan ResilienceRetryDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ResilienceCircuitOpenDuration = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan AgentProjectGitHistoryCommandTimeout = TimeSpan.FromSeconds(2);
+    private static readonly HashSet<string> AgentProjectCodeExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs",
+        ".fs",
+        ".vb",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".py",
+        ".java",
+        ".kt",
+        ".go",
+        ".rs",
+        ".swift",
+        ".php",
+        ".rb",
+        ".c",
+        ".cpp",
+        ".h",
+        ".hpp",
+        ".sql",
+        ".ps1",
+        ".sh"
+    };
+    private static readonly HashSet<string> AgentProjectDocumentationExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".md",
+        ".mdx",
+        ".rst",
+        ".adoc",
+        ".txt"
+    };
+    private static readonly HashSet<string> AgentProjectDocumentationFileNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "readme",
+        "readme.md",
+        "changelog",
+        "changelog.md",
+        "license",
+        "license.md",
+        "contributing",
+        "contributing.md"
+    };
     private static readonly string[] InteractiveChatCommandSuggestions =
     [
         "/help",
@@ -45,6 +113,9 @@ internal static class Program
     private static readonly string[] CliOptionSuggestions =
     [
         "--model",
+        "--max-steps",
+        "--max-time",
+        "--max-cost",
         "--dry-run",
         "--help",
         "--version",
@@ -166,6 +237,24 @@ internal static class Program
             DefaultModelsExecutor,
             DefaultCancelSignalRegistration,
             NoOpUserConfigInitializer);
+    }
+
+    internal static int RunForTests(
+        string[] args,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        IToolRuntime toolRuntime)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(toolRuntime);
+
+        return Run(
+            args,
+            promptExecutor,
+            DefaultHealthcheckExecutor,
+            DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer,
+            toolRuntimeOverride: toolRuntime);
     }
 
     internal static int RunForTests(
@@ -398,7 +487,8 @@ internal static class Program
         Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null,
         Func<WorkspacePatchAuditEntry, string>? workspacePatchAuditAppender = null,
         Action<ExecutionSessionCheckpoint>? executionCheckpointAppender = null,
-        Func<IReadOnlyList<ExecutionSessionCheckpoint>>? executionCheckpointLoader = null)
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>>? executionCheckpointLoader = null,
+        IToolRuntime? toolRuntimeOverride = null)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(healthcheckExecutor);
@@ -433,7 +523,7 @@ internal static class Program
         try
         {
             userConfigInitializer();
-            var toolRuntime = CreateDefaultToolRuntime();
+            var toolRuntime = toolRuntimeOverride ?? CreateDefaultToolRuntime();
 
             ConsoleLogger.ConfigureTheme(UserRuntimeConfig.Default.Theme);
             if (applyConfiguredTheme)
@@ -468,7 +558,8 @@ internal static class Program
                     fallbackPromptExecutor,
                     cancelSignalRegistration,
                     executionCheckpointAppender,
-                    executionCheckpointLoader);
+                    executionCheckpointLoader,
+                    toolRuntime);
             }
 
             if (parseResult.RunAgent && parseResult.AgentObjective is not null)
@@ -476,9 +567,13 @@ internal static class Program
                 return ExecuteAgent(
                     parseResult.AgentObjective,
                     parseResult.SelectedModel,
+                    parseResult.AgentMaxSteps,
+                    parseResult.AgentMaxTime,
+                    parseResult.AgentMaxCost,
                     fallbackPromptExecutor,
                     cancelSignalRegistration,
-                    executionCheckpointAppender);
+                    executionCheckpointAppender,
+                    toolRuntime);
             }
 
             if (parseResult.AskPrompt is not null)
@@ -1781,11 +1876,12 @@ internal static class Program
     private static ParseResult ParseAgentArguments(string[] args)
     {
         var commandArguments = args.Skip(1).ToArray();
-        var optionError = TryExtractModelOption(
+        var optionError = TryExtractAgentOptions(
             commandArguments,
-            commandName: "agent",
-            usageExample: $"{CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".",
             out var selectedModel,
+            out var maxSteps,
+            out var maxTime,
+            out var maxCost,
             out var remainingArguments);
 
         if (optionError is CliFriendlyError error)
@@ -1842,7 +1938,10 @@ internal static class Program
             SelectedModel: selectedModel,
             Error: null,
             RunAgent: true,
-            AgentObjective: objective);
+            AgentObjective: objective,
+            AgentMaxSteps: maxSteps,
+            AgentMaxTime: maxTime,
+            AgentMaxCost: maxCost);
     }
 
     private static ParseResult ParseChatArguments(string[] args)
@@ -2109,6 +2208,231 @@ internal static class Program
             SkillPrompt: prompt);
     }
 
+    private static CliFriendlyError? TryExtractAgentOptions(
+        string[] arguments,
+        out string? selectedModel,
+        out int? maxSteps,
+        out TimeSpan? maxTime,
+        out decimal? maxCost,
+        out List<string> remainingArguments)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        selectedModel = null;
+        maxSteps = null;
+        maxTime = null;
+        maxCost = null;
+        remainingArguments = [];
+
+        for (var index = 0; index < arguments.Length; index++)
+        {
+            var argument = arguments[index];
+
+            if (string.Equals(argument, "--", StringComparison.Ordinal))
+            {
+                remainingArguments.AddRange(arguments[(index + 1)..]);
+                break;
+            }
+
+            if (string.Equals(argument, ModelFlag, StringComparison.OrdinalIgnoreCase))
+            {
+                if (selectedModel is not null)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{ModelFlag}' foi informada mais de uma vez no comando 'agent'.",
+                        suggestion: $"Exemplo: {CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".");
+                }
+
+                if (index + 1 >= arguments.Length)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{ModelFlag}' exige um nome de modelo.",
+                        suggestion: $"Exemplo: {CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".");
+                }
+
+                var candidate = arguments[++index].Trim();
+                if (string.IsNullOrWhiteSpace(candidate) || candidate.StartsWith('-'))
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{ModelFlag}' exige um nome de modelo.",
+                        suggestion: $"Exemplo: {CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".");
+                }
+
+                selectedModel = candidate;
+                continue;
+            }
+
+            if (argument.StartsWith($"{ModelFlag}=", StringComparison.OrdinalIgnoreCase))
+            {
+                if (selectedModel is not null)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{ModelFlag}' foi informada mais de uma vez no comando 'agent'.",
+                        suggestion: $"Exemplo: {CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".");
+                }
+
+                var candidate = argument[(ModelFlag.Length + 1)..].Trim();
+                if (string.IsNullOrWhiteSpace(candidate))
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{ModelFlag}' exige um nome de modelo.",
+                        suggestion: $"Exemplo: {CliName} agent --model {OllamaModelDefaults.DefaultModel} \"seu objetivo\".");
+                }
+
+                selectedModel = candidate;
+                continue;
+            }
+
+            if (TryReadOptionValueWithAlias(
+                arguments,
+                ref index,
+                AgentMaxStepsFlag,
+                AgentMaxStepsAliasFlag,
+                out var maxStepsValue,
+                out var maxStepsError))
+            {
+                if (maxStepsError is CliFriendlyError error)
+                {
+                    return error;
+                }
+
+                if (maxSteps is not null)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentMaxStepsFlag}' foi informada mais de uma vez no comando 'agent'.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentMaxStepsFlag} 6 \"seu objetivo\".");
+                }
+
+                if (!int.TryParse(
+                    maxStepsValue,
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var parsedMaxSteps)
+                    || parsedMaxSteps <= 0)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentMaxStepsFlag}' exige um numero inteiro positivo.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentMaxStepsFlag} 6 \"seu objetivo\".");
+                }
+
+                maxSteps = parsedMaxSteps;
+                continue;
+            }
+
+            if (TryReadOptionValueWithAlias(
+                arguments,
+                ref index,
+                AgentMaxTimeFlag,
+                AgentMaxTimeAliasFlag,
+                out var maxTimeValue,
+                out var maxTimeError))
+            {
+                if (maxTimeError is CliFriendlyError error)
+                {
+                    return error;
+                }
+
+                if (maxTime is not null)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentMaxTimeFlag}' foi informada mais de uma vez no comando 'agent'.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentMaxTimeFlag} 90 \"seu objetivo\".");
+                }
+
+                if (!TryParsePositiveDuration(maxTimeValue, out var parsedMaxTime))
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentMaxTimeFlag}' exige um valor positivo em segundos ou hh:mm:ss.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentMaxTimeFlag} 90 \"seu objetivo\".");
+                }
+
+                maxTime = parsedMaxTime;
+                continue;
+            }
+
+            if (TryReadOptionValueWithAlias(
+                arguments,
+                ref index,
+                AgentMaxCostFlag,
+                AgentMaxCostAliasFlag,
+                out var maxCostValue,
+                out var maxCostError))
+            {
+                if (maxCostError is CliFriendlyError error)
+                {
+                    return error;
+                }
+
+                if (maxCost is not null)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentMaxCostFlag}' foi informada mais de uma vez no comando 'agent'.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentMaxCostFlag} 2000 \"seu objetivo\".");
+                }
+
+                if (!decimal.TryParse(
+                    maxCostValue,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var parsedMaxCost)
+                    || parsedMaxCost <= 0m)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentMaxCostFlag}' exige um numero positivo.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentMaxCostFlag} 2000 \"seu objetivo\".");
+                }
+
+                maxCost = parsedMaxCost;
+                continue;
+            }
+
+            remainingArguments.Add(argument);
+        }
+
+        return null;
+    }
+
+    private static bool TryReadOptionValueWithAlias(
+        string[] args,
+        ref int index,
+        string optionName,
+        string aliasOptionName,
+        out string optionValue,
+        out CliFriendlyError? error)
+    {
+        if (TryReadOptionValue(args, ref index, optionName, out optionValue, out error))
+        {
+            return true;
+        }
+
+        return TryReadOptionValue(args, ref index, aliasOptionName, out optionValue, out error);
+    }
+
+    private static bool TryParsePositiveDuration(string rawValue, out TimeSpan parsedDuration)
+    {
+        if (double.TryParse(
+            rawValue,
+            NumberStyles.Float,
+            CultureInfo.InvariantCulture,
+            out var seconds)
+            && double.IsFinite(seconds)
+            && seconds > 0d)
+        {
+            parsedDuration = TimeSpan.FromSeconds(seconds);
+            return true;
+        }
+
+        if (TimeSpan.TryParse(rawValue, CultureInfo.InvariantCulture, out var duration)
+            && duration > TimeSpan.Zero)
+        {
+            parsedDuration = duration;
+            return true;
+        }
+
+        parsedDuration = TimeSpan.Zero;
+        return false;
+    }
+
     private static CliFriendlyError? TryExtractModelOption(
         string[] arguments,
         string commandName,
@@ -2223,13 +2547,17 @@ internal static class Program
         Console.WriteLine("  -h, --help       Exibe ajuda.");
         Console.WriteLine("  -v, --version    Exibe a versao.");
         Console.WriteLine($"  --model <nome>   Seleciona o modelo Ollama para 'ask', 'agent', 'chat' e 'skill' (padrao: {OllamaModelDefaults.DefaultModel}).");
+        Console.WriteLine($"  {AgentMaxStepsFlag} <n>  Limita iteracoes do comando 'agent' por sessao (padrao: {AgentAutonomousMaxIterations}).");
+        Console.WriteLine($"  {AgentMaxTimeFlag} <v>   Limita duracao da sessao do 'agent' (segundos ou hh:mm:ss).");
+        Console.WriteLine($"  {AgentMaxCostFlag} <v>   Limita custo estimado do 'agent' em caracteres (prompt + resposta).");
         Console.WriteLine($"  {OllamaModelDefaults.DefaultModelEnvironmentVariable}=<nome>");
         Console.WriteLine("                   Sobrescreve o modelo padrao quando --model nao e informado.");
         Console.WriteLine();
         Console.WriteLine("Comandos:");
         Console.WriteLine("  ask \"prompt\"    Executa um prompt unico.");
         Console.WriteLine("  agent \"objetivo\" Inicia o modo agente autonomo orientado por objetivo.");
-        Console.WriteLine("                   O prompt e expandido com diretrizes de planejamento e verificacao.");
+        Console.WriteLine("                   Executa o loop plan -> execute -> verify -> refine ate concluir.");
+        Console.WriteLine($"                   Opcional: use {AgentMaxStepsFlag}, {AgentMaxTimeFlag} e {AgentMaxCostFlag} para controlar orcamento da sessao.");
         Console.WriteLine("  chat             Inicia o modo interativo.");
         Console.WriteLine("                   Comandos no chat: /help, /clear, /models, /tools, /exit.");
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
@@ -2294,29 +2622,1101 @@ internal static class Program
     private static int ExecuteAgent(
         string objective,
         string? model,
+        int? maxSteps,
+        TimeSpan? maxTime,
+        decimal? maxCost,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
-        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
+        IToolRuntime toolRuntime,
+        AgentAutonomousLoopState? resumeLoopState = null,
+        string? checkpointSessionId = null)
     {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(cancelSignalRegistration);
         ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
+        ArgumentNullException.ThrowIfNull(toolRuntime);
 
         ConsoleLogger.Info("Iniciando modo agente autonomo por objetivo.");
-        var promptWithAgentMode = BuildAgentPrompt(objective);
+        var sessionBudget = new AgentSessionBudget(
+            MaxSteps: maxSteps ?? AgentAutonomousMaxIterations,
+            MaxTime: maxTime,
+            MaxCost: maxCost);
+        ConsoleLogger.Info(
+            $"Orcamento da sessao do agente: max_steps={sessionBudget.MaxSteps}, " +
+            $"max_time={FormatOptionalBudgetDuration(sessionBudget.MaxTime)}, " +
+            $"max_cost={FormatOptionalBudgetValue(sessionBudget.MaxCost)}.");
+        var normalizedResumeLoopState = NormalizeAgentAutonomousLoopState(
+            resumeLoopState ?? AgentAutonomousLoopState.Initial,
+            sessionBudget.MaxSteps);
+        if (resumeLoopState is AgentAutonomousLoopState)
+        {
+            ConsoleLogger.Info(
+                $"Retomando loop autonomo a partir da iteracao {normalizedResumeLoopState.NextIteration}/{sessionBudget.MaxSteps}.");
+        }
+
+        ConsoleLogger.Info(
+            "Coletando contexto de engenharia do projeto antes do ciclo autonomo.");
+        var projectContext = LoadAgentProjectContextSnapshot();
+        ConsoleLogger.Info(
+            $"Contexto de engenharia carregado: codigo={projectContext.CodeFileCount}, " +
+            $"testes={projectContext.TestFileCount}, docs={projectContext.DocumentationFileCount}, " +
+            $"git={projectContext.GitHistorySummary}.");
+
+        var executionPlan = AgentObjectivePlanner.Build(objective);
         var checkpointContext = CreatePromptCheckpointContext(
             command: "agent",
             prompt: objective,
             model: model,
             skillName: null,
-            executionCheckpointAppender: executionCheckpointAppender);
-        var wasCancelled = ExecutePrompt(
-            promptWithAgentMode,
+            executionCheckpointAppender: executionCheckpointAppender,
+            sessionId: checkpointSessionId);
+
+        var loopResult = ExecuteAgentAutonomousLoop(
+            executionPlan,
             model,
+            sessionBudget,
             promptExecutor,
             cancelSignalRegistration,
-            checkpointContext);
-        return wasCancelled
-            ? (int)CliExitCode.Cancelled
-            : (int)CliExitCode.Success;
+            projectContext,
+            normalizedResumeLoopState,
+            checkpointContext,
+            toolRuntime);
+
+        if (loopResult.WasCancelled)
+        {
+            return (int)CliExitCode.Cancelled;
+        }
+
+        if (!loopResult.IsConcluded)
+        {
+            var notConcludedDetail = loopResult.BudgetLimitKind switch
+            {
+                AgentBudgetLimitKind.MaxTime =>
+                    "Loop autonomo interrompido por limite de tempo da sessao " +
+                    $"(max_time={FormatRequiredBudgetDuration(sessionBudget.MaxTime)}, " +
+                    $"decorrido={FormatRequiredBudgetDuration(loopResult.Elapsed)}).",
+                AgentBudgetLimitKind.MaxCost =>
+                    "Loop autonomo interrompido por limite de custo da sessao " +
+                    $"(max_cost={FormatRequiredBudgetValue(sessionBudget.MaxCost)}, " +
+                    $"custo_atual={FormatRequiredBudgetValue(loopResult.AccumulatedCost)}).",
+                _ =>
+                    $"Loop autonomo interrompido apos {loopResult.IterationCount} iteracao(oes) " +
+                    "sem sinal explicito de conclusao na fase verify."
+            };
+            WriteExecutionStateAndCheckpoint(
+                ExecutionState.Error,
+                notConcludedDetail,
+                checkpointContext,
+                ExecutionCheckpointStatus.Failed);
+
+            var notConcludedError = loopResult.BudgetLimitKind switch
+            {
+                AgentBudgetLimitKind.MaxTime => CliFriendlyError.Runtime(
+                    detail: "O modo agente atingiu o limite de tempo da sessao.",
+                    suggestion:
+                    $"Ajuste '{AgentMaxTimeFlag}', reduza o escopo do objetivo ou execute com checkpoints menores."),
+                AgentBudgetLimitKind.MaxCost => CliFriendlyError.Runtime(
+                    detail: "O modo agente atingiu o limite de custo da sessao.",
+                    suggestion:
+                    $"Ajuste '{AgentMaxCostFlag}', reduza o objetivo ou escolha um modelo mais economico."),
+                _ => CliFriendlyError.Runtime(
+                    detail: "O modo agente nao conseguiu concluir o objetivo com seguranca.",
+                    suggestion:
+                    "Refine o objetivo com escopo menor ou execute novamente com instrucoes de verificacao mais explicitas.")
+            };
+            WriteFriendlyError(notConcludedError);
+            return (int)notConcludedError.ExitCode;
+        }
+
+        WriteExecutionStateAndCheckpoint(
+            ExecutionState.Completed,
+            $"Loop autonomo concluido apos {loopResult.IterationCount} iteracao(oes).",
+            checkpointContext,
+            ExecutionCheckpointStatus.Completed);
+        return (int)CliExitCode.Success;
+    }
+
+    private static AgentAutonomousLoopResult ExecuteAgentAutonomousLoop(
+        AgentExecutionPlan executionPlan,
+        string? model,
+        AgentSessionBudget sessionBudget,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        AgentProjectContextSnapshot projectContext,
+        AgentAutonomousLoopState initialLoopState,
+        PromptExecutionCheckpointContext checkpointContext,
+        IToolRuntime toolRuntime)
+    {
+        var previousVerificationOutput = initialLoopState.PreviousVerificationOutput;
+        var previousRefinementOutput = initialLoopState.PreviousRefinementOutput;
+        var resumedElapsed = initialLoopState.Elapsed;
+        var stopwatch = Stopwatch.StartNew();
+        var accumulatedCost = initialLoopState.AccumulatedCost;
+
+        for (var iteration = initialLoopState.NextIteration; iteration <= sessionBudget.MaxSteps; iteration++)
+        {
+            var elapsedAtIterationStart = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
+            if (ResolveBudgetExceededResult(
+                sessionBudget,
+                iteration,
+                elapsedAtIterationStart,
+                accumulatedCost) is AgentAutonomousLoopResult budgetExceededAtIterationStart)
+            {
+                return budgetExceededAtIterationStart;
+            }
+
+            AppendAgentAutonomousLoopCheckpoint(
+                checkpointContext,
+                sessionBudget,
+                new AgentAutonomousLoopState(
+                    NextIteration: iteration,
+                    PreviousVerificationOutput: previousVerificationOutput,
+                    PreviousRefinementOutput: previousRefinementOutput,
+                    Elapsed: elapsedAtIterationStart,
+                    AccumulatedCost: accumulatedCost));
+
+            ConsoleLogger.Info(
+                $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase plan.");
+            var planPrompt = BuildAgentPlanPhasePrompt(
+                executionPlan,
+                iteration,
+                projectContext,
+                previousVerificationOutput,
+                previousRefinementOutput);
+            var planResult = ExecutePromptAndCapture(
+                planPrompt,
+                model,
+                promptExecutor,
+                cancelSignalRegistration,
+                checkpointContext);
+            if (planResult.WasCancelled)
+            {
+                return AgentAutonomousLoopResult.Cancelled(
+                    iteration,
+                    GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                    accumulatedCost);
+            }
+
+            accumulatedCost += EstimateAgentStepCost(planPrompt, planResult.StreamMetrics);
+            var elapsedAfterPlan = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
+            if (ResolveBudgetExceededResult(
+                sessionBudget,
+                iteration,
+                elapsedAfterPlan,
+                accumulatedCost) is AgentAutonomousLoopResult budgetExceededAfterPlan)
+            {
+                return budgetExceededAfterPlan;
+            }
+
+            ConsoleLogger.Info(
+                $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase execute.");
+            var executePrompt = BuildAgentExecutePhasePrompt(
+                executionPlan,
+                iteration,
+                projectContext,
+                planResult.StreamMetrics.ResponseText,
+                previousRefinementOutput);
+            var executeResult = ExecutePromptAndCapture(
+                executePrompt,
+                model,
+                promptExecutor,
+                cancelSignalRegistration,
+                checkpointContext);
+            if (executeResult.WasCancelled)
+            {
+                return AgentAutonomousLoopResult.Cancelled(
+                    iteration,
+                    GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                    accumulatedCost);
+            }
+
+            var executeEvidence = ParseAgentCodeChangeEvidence(
+                executeResult.StreamMetrics.ResponseText);
+            ConsoleLogger.Info(BuildAgentCodeChangeEvidenceLogMessage(executeEvidence));
+            var validationReport = ExecuteAgentValidationAfterChangeBlock(
+                executeEvidence,
+                projectContext,
+                toolRuntime);
+            var latestExecutionOutput = executeResult.StreamMetrics.ResponseText;
+            var autoCorrectionResult = ExecuteAgentAutoCorrectionWhenValidationFails(
+                executionPlan,
+                iteration,
+                projectContext,
+                planResult.StreamMetrics.ResponseText,
+                latestExecutionOutput,
+                executeEvidence,
+                validationReport,
+                model,
+                promptExecutor,
+                cancelSignalRegistration,
+                checkpointContext,
+                toolRuntime);
+            if (autoCorrectionResult.WasCancelled)
+            {
+                return AgentAutonomousLoopResult.Cancelled(
+                    iteration,
+                    GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                    accumulatedCost);
+            }
+
+            latestExecutionOutput = autoCorrectionResult.LatestExecutionOutput;
+            executeEvidence = autoCorrectionResult.LatestChangeEvidence;
+            validationReport = autoCorrectionResult.ValidationReport;
+
+            accumulatedCost += EstimateAgentStepCost(executePrompt, executeResult.StreamMetrics);
+            accumulatedCost += autoCorrectionResult.AdditionalCost;
+            var elapsedAfterExecute = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
+            if (ResolveBudgetExceededResult(
+                sessionBudget,
+                iteration,
+                elapsedAfterExecute,
+                accumulatedCost) is AgentAutonomousLoopResult budgetExceededAfterExecute)
+            {
+                return budgetExceededAfterExecute;
+            }
+
+            ConsoleLogger.Info(
+                $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase verify.");
+            var verifyPrompt = BuildAgentVerifyPhasePrompt(
+                executionPlan,
+                iteration,
+                projectContext,
+                planResult.StreamMetrics.ResponseText,
+                latestExecutionOutput,
+                executeEvidence,
+                validationReport);
+            var verifyResult = ExecutePromptAndCapture(
+                verifyPrompt,
+                model,
+                promptExecutor,
+                cancelSignalRegistration,
+                checkpointContext);
+            if (verifyResult.WasCancelled)
+            {
+                return AgentAutonomousLoopResult.Cancelled(
+                    iteration,
+                    GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                    accumulatedCost);
+            }
+
+            accumulatedCost += EstimateAgentStepCost(verifyPrompt, verifyResult.StreamMetrics);
+            var elapsedAfterVerify = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
+            if (ResolveBudgetExceededResult(
+                sessionBudget,
+                iteration,
+                elapsedAfterVerify,
+                accumulatedCost) is AgentAutonomousLoopResult budgetExceededAfterVerify)
+            {
+                return budgetExceededAfterVerify;
+            }
+
+            previousVerificationOutput = verifyResult.StreamMetrics.ResponseText;
+            var verificationDecision = ParseAgentVerificationDecision(previousVerificationOutput);
+            if (verificationDecision.IsConcluded && !executeEvidence.IsCompliant)
+            {
+                ConsoleLogger.Info(
+                    "Verificacao marcou status 'done', mas as evidencias de diff/justificativa por mudanca estao incompletas. Forcando refine.");
+                verificationDecision = AgentVerificationDecision.NeedsRefine("missing-change-evidence");
+            }
+            else if (verificationDecision.IsConcluded && validationReport.HasFailures)
+            {
+                ConsoleLogger.Info(
+                    "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.");
+                verificationDecision = AgentVerificationDecision.NeedsRefine("validation-failed");
+            }
+
+            if (verificationDecision.IsConcluded)
+            {
+                ConsoleLogger.Info(
+                    $"Verificacao marcou status '{verificationDecision.Status}'. Objetivo concluido.");
+                return AgentAutonomousLoopResult.Concluded(
+                    iteration,
+                    GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                    accumulatedCost);
+            }
+
+            if (iteration >= sessionBudget.MaxSteps)
+            {
+                break;
+            }
+
+            ConsoleLogger.Info(
+                $"Verificacao marcou status '{verificationDecision.Status}'. Iniciando fase refine.");
+            var refinePrompt = BuildAgentRefinePhasePrompt(
+                executionPlan,
+                iteration,
+                projectContext,
+                planResult.StreamMetrics.ResponseText,
+                latestExecutionOutput,
+                verifyResult.StreamMetrics.ResponseText);
+            var refineResult = ExecutePromptAndCapture(
+                refinePrompt,
+                model,
+                promptExecutor,
+                cancelSignalRegistration,
+                checkpointContext);
+            if (refineResult.WasCancelled)
+            {
+                return AgentAutonomousLoopResult.Cancelled(
+                    iteration,
+                    GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                    accumulatedCost);
+            }
+
+            accumulatedCost += EstimateAgentStepCost(refinePrompt, refineResult.StreamMetrics);
+            var elapsedAfterRefine = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
+            if (ResolveBudgetExceededResult(
+                sessionBudget,
+                iteration,
+                elapsedAfterRefine,
+                accumulatedCost) is AgentAutonomousLoopResult budgetExceededAfterRefine)
+            {
+                return budgetExceededAfterRefine;
+            }
+
+            previousRefinementOutput = refineResult.StreamMetrics.ResponseText;
+        }
+
+        return AgentAutonomousLoopResult.NotConcluded(
+            sessionBudget.MaxSteps,
+            GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+            accumulatedCost);
+    }
+
+    private static AgentValidationReport ExecuteAgentValidationAfterChangeBlock(
+        AgentCodeChangeEvidence executeEvidence,
+        AgentProjectContextSnapshot projectContext,
+        IToolRuntime toolRuntime)
+    {
+        if (!ShouldRunAgentValidationAfterChangeBlock(executeEvidence))
+        {
+            return AgentValidationReport.NotRequired();
+        }
+
+        ConsoleLogger.Info(
+            "Validacao automatica pos-mudanca: bloco de alteracoes detectado; executando build, test e lint.");
+
+        var runner = new AgentValidationCommandRunner(toolRuntime);
+        var validationReport = runner
+            .RunAsync(projectContext.WorkspaceRootDirectory, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        WriteAgentValidationLog(validationReport);
+        return validationReport;
+    }
+
+    private static AgentAutoCorrectionResult ExecuteAgentAutoCorrectionWhenValidationFails(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        string latestPlanOutput,
+        string latestExecutionOutput,
+        AgentCodeChangeEvidence latestChangeEvidence,
+        AgentValidationReport validationReport,
+        string? model,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        PromptExecutionCheckpointContext checkpointContext,
+        IToolRuntime toolRuntime)
+    {
+        if (!ShouldRunAgentAutoCorrection(validationReport))
+        {
+            return AgentAutoCorrectionResult.NotRequired(
+                latestExecutionOutput,
+                latestChangeEvidence,
+                validationReport);
+        }
+
+        var currentExecutionOutput = latestExecutionOutput;
+        var currentChangeEvidence = latestChangeEvidence;
+        var currentValidationReport = validationReport;
+        var autoCorrectionTranscript = new StringBuilder();
+        var additionalCost = 0m;
+
+        for (var attempt = 1; attempt <= AgentAutoCorrectionMaxAttempts; attempt++)
+        {
+            ConsoleLogger.Info(
+                $"Auto-correcao de validacao: tentativa {attempt}/{AgentAutoCorrectionMaxAttempts} apos falha em build/test/lint.");
+            var correctionPrompt = BuildAgentAutoCorrectionPrompt(
+                executionPlan,
+                iteration,
+                projectContext,
+                latestPlanOutput,
+                currentExecutionOutput,
+                currentValidationReport,
+                attempt,
+                AgentAutoCorrectionMaxAttempts);
+            var correctionResult = ExecutePromptAndCapture(
+                correctionPrompt,
+                model,
+                promptExecutor,
+                cancelSignalRegistration,
+                checkpointContext);
+            if (correctionResult.WasCancelled)
+            {
+                return AgentAutoCorrectionResult.Cancelled(
+                    currentExecutionOutput,
+                    currentChangeEvidence,
+                    currentValidationReport,
+                    additionalCost);
+            }
+
+            additionalCost += EstimateAgentStepCost(
+                correctionPrompt,
+                correctionResult.StreamMetrics);
+            var correctionOutput = correctionResult.StreamMetrics.ResponseText;
+            AppendAgentAutoCorrectionTranscript(
+                autoCorrectionTranscript,
+                attempt,
+                correctionOutput);
+
+            var correctionEvidence = ParseAgentCodeChangeEvidence(correctionOutput);
+            ConsoleLogger.Info(BuildAgentAutoCorrectionEvidenceLogMessage(attempt, correctionEvidence));
+            currentExecutionOutput = BuildAgentExecutionOutputWithAutoCorrection(
+                latestExecutionOutput,
+                autoCorrectionTranscript.ToString());
+
+            if (correctionEvidence.RequiresValidation || correctionEvidence.DeclaredNoCodeChanges)
+            {
+                currentChangeEvidence = correctionEvidence;
+            }
+
+            if (!ShouldRunAgentValidationAfterChangeBlock(correctionEvidence))
+            {
+                ConsoleLogger.Info(
+                    "Auto-correcao de validacao: tentativa nao declarou bloco de mudancas validavel; mantendo falha atual.");
+            }
+            else
+            {
+                currentChangeEvidence = correctionEvidence;
+                currentValidationReport = ExecuteAgentValidationAfterChangeBlock(
+                    correctionEvidence,
+                    projectContext,
+                    toolRuntime);
+
+                if (!currentValidationReport.HasFailures)
+                {
+                    ConsoleLogger.Info(
+                        $"Auto-correcao de validacao: validacao passou apos tentativa {attempt}/{AgentAutoCorrectionMaxAttempts}.");
+                    break;
+                }
+            }
+
+            if (!currentValidationReport.HasFailures)
+            {
+                break;
+            }
+
+            if (attempt < AgentAutoCorrectionMaxAttempts)
+            {
+                ConsoleLogger.Info(
+                    "Auto-correcao de validacao: validacao ainda falhou; preparando nova tentativa.");
+                continue;
+            }
+
+            ConsoleLogger.Info(
+                $"Auto-correcao de validacao: limite de {AgentAutoCorrectionMaxAttempts} tentativa(s) atingido; mantendo falha para verify/refine.");
+        }
+
+        return new AgentAutoCorrectionResult(
+            WasCancelled: false,
+            LatestExecutionOutput: currentExecutionOutput,
+            LatestChangeEvidence: currentChangeEvidence,
+            ValidationReport: currentValidationReport,
+            AdditionalCost: additionalCost);
+    }
+
+    private static bool ShouldRunAgentAutoCorrection(AgentValidationReport validationReport)
+    {
+        return validationReport.WasRequired
+            && validationReport.CommandsDiscovered
+            && validationReport.HasFailures;
+    }
+
+    private static void AppendAgentAutoCorrectionTranscript(
+        StringBuilder builder,
+        int attempt,
+        string correctionOutput)
+    {
+        if (builder.Length > 0)
+        {
+            builder.AppendLine();
+        }
+
+        builder.AppendLine($"[AUTO-CORRECAO TENTATIVA {attempt}]");
+        builder.Append(BuildPromptContextExcerpt(
+            correctionOutput,
+            "A tentativa nao retornou evidencias."));
+    }
+
+    private static string BuildAgentExecutionOutputWithAutoCorrection(
+        string originalExecutionOutput,
+        string autoCorrectionTranscript)
+    {
+        if (string.IsNullOrWhiteSpace(autoCorrectionTranscript))
+        {
+            return originalExecutionOutput;
+        }
+
+        return
+            $"""
+            [EXECUCAO ORIGINAL]
+            {BuildPromptContextExcerpt(originalExecutionOutput, "Sem evidencias de execucao original.")}
+
+            [AUTO-CORRECAO POS-VALIDACAO]
+            {autoCorrectionTranscript.Trim()}
+            """;
+    }
+
+    private static bool ShouldRunAgentValidationAfterChangeBlock(
+        AgentCodeChangeEvidence executeEvidence)
+    {
+        return executeEvidence.HasDeclaredCodeChanges
+            && executeEvidence.IsCompliant;
+    }
+
+    private static void WriteAgentValidationLog(AgentValidationReport validationReport)
+    {
+        if (!validationReport.WasRequired)
+        {
+            return;
+        }
+
+        if (!validationReport.CommandsDiscovered)
+        {
+            ConsoleLogger.Info(
+                "Validacao automatica pos-mudanca: nenhum comando build/test/lint foi descoberto para este workspace.");
+            return;
+        }
+
+        foreach (var result in validationReport.Results)
+        {
+            var status = result.IsSuccess ? "passou" : "falhou";
+            ConsoleLogger.Info(
+                $"Validacao automatica '{result.Name}' {status} " +
+                $"(exit_code={result.ExitCode}, duracao={FormatRequiredBudgetDuration(result.Duration)}).");
+        }
+    }
+
+    private static AgentProjectContextSnapshot LoadAgentProjectContextSnapshot()
+    {
+        try
+        {
+            var workspaceRoot = WorkspaceRootDetector.Resolve();
+            var workspaceIndex = WorkspaceContextFileIndexCatalog.GetOrCreate(workspaceRoot.DirectoryPath);
+            var indexedFilePaths = workspaceIndex.CurrentMap.Entries
+                .Where(static entry => entry.Kind == WorkspaceEntryKind.File)
+                .Select(static entry => NormalizeAgentProjectRelativePath(entry.RelativePath))
+                .ToArray();
+
+            var codeFiles = new List<string>();
+            var testFiles = new List<string>();
+            var documentationFiles = new List<string>();
+
+            foreach (var indexedFilePath in indexedFilePaths)
+            {
+                if (IsAgentProjectTestFile(indexedFilePath))
+                {
+                    testFiles.Add(indexedFilePath);
+                }
+
+                if (IsAgentProjectDocumentationFile(indexedFilePath))
+                {
+                    documentationFiles.Add(indexedFilePath);
+                }
+
+                if (IsAgentProjectCodeFile(indexedFilePath))
+                {
+                    codeFiles.Add(indexedFilePath);
+                }
+            }
+
+            var recentGitCommits = TryReadAgentRecentGitHistory(
+                workspaceRoot.DirectoryPath,
+                out var gitHistorySummary);
+
+            return new AgentProjectContextSnapshot(
+                WorkspaceRootDirectory: workspaceRoot.DirectoryPath,
+                WorkspaceRootKind: workspaceRoot.Kind,
+                IndexedFileCount: indexedFilePaths.Length,
+                CodeFileCount: codeFiles.Count,
+                TestFileCount: testFiles.Count,
+                DocumentationFileCount: documentationFiles.Count,
+                CodeFileSamples: codeFiles.Take(AgentProjectContextSampleLimit).ToArray(),
+                TestFileSamples: testFiles.Take(AgentProjectContextSampleLimit).ToArray(),
+                DocumentationFileSamples: documentationFiles.Take(AgentProjectContextSampleLimit).ToArray(),
+                RecentGitCommits: recentGitCommits,
+                GitHistorySummary: gitHistorySummary);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or DirectoryNotFoundException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            var fallbackDirectory = TryResolveCurrentDirectoryForAgentContext();
+            var failureDetail = TruncateAgentProjectContextValue(ex.Message, 180);
+            return new AgentProjectContextSnapshot(
+                WorkspaceRootDirectory: fallbackDirectory,
+                WorkspaceRootKind: WorkspaceRootKind.CurrentDirectory,
+                IndexedFileCount: 0,
+                CodeFileCount: 0,
+                TestFileCount: 0,
+                DocumentationFileCount: 0,
+                CodeFileSamples: [],
+                TestFileSamples: [],
+                DocumentationFileSamples: [],
+                RecentGitCommits: [],
+                GitHistorySummary: $"indisponivel ({failureDetail})");
+        }
+    }
+
+    private static string TryResolveCurrentDirectoryForAgentContext()
+    {
+        try
+        {
+            return Directory.GetCurrentDirectory();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"<diretorio-indisponivel: {TruncateAgentProjectContextValue(ex.Message, 100)}>";
+        }
+    }
+
+    private static IReadOnlyList<string> TryReadAgentRecentGitHistory(
+        string workspaceRootDirectory,
+        out string summary)
+    {
+        var gitDirectoryPath = Path.Combine(workspaceRootDirectory, ".git");
+        if (!Directory.Exists(gitDirectoryPath) && !File.Exists(gitDirectoryPath))
+        {
+            summary = "repositorio git nao detectado.";
+            return [];
+        }
+
+        try
+        {
+            using var process = new Process
+            {
+                StartInfo = BuildAgentGitHistoryProcessStartInfo(workspaceRootDirectory)
+            };
+
+            if (!process.Start())
+            {
+                summary = "nao foi possivel iniciar o comando git.";
+                return [];
+            }
+
+            var standardOutput = process.StandardOutput.ReadToEnd();
+            var standardError = process.StandardError.ReadToEnd();
+
+            if (!process.WaitForExit((int)AgentProjectGitHistoryCommandTimeout.TotalMilliseconds))
+            {
+                TryKillAgentGitHistoryProcess(process);
+                summary =
+                    $"comando git excedeu o limite de {FormatRequiredBudgetDuration(AgentProjectGitHistoryCommandTimeout)}.";
+                return [];
+            }
+
+            if (process.ExitCode != 0)
+            {
+                var standardErrorExcerpt = TruncateAgentProjectContextValue(standardError, 180);
+                summary = standardErrorExcerpt.Length == 0
+                    ? $"git retornou codigo {process.ExitCode}."
+                    : $"git retornou codigo {process.ExitCode}: {standardErrorExcerpt}";
+                return [];
+            }
+
+            var commits = ParseAgentRecentGitHistory(standardOutput);
+            summary = commits.Count == 0
+                ? "sem commits recentes identificados."
+                : $"{commits.Count} commit(s) recentes.";
+            return commits;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or Win32Exception
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            summary = $"indisponivel ({TruncateAgentProjectContextValue(ex.Message, 180)})";
+            return [];
+        }
+    }
+
+    private static ProcessStartInfo BuildAgentGitHistoryProcessStartInfo(string workspaceRootDirectory)
+    {
+        var processStartInfo = new ProcessStartInfo
+        {
+            FileName = "git",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        processStartInfo.ArgumentList.Add("-C");
+        processStartInfo.ArgumentList.Add(workspaceRootDirectory);
+        processStartInfo.ArgumentList.Add("--no-pager");
+        processStartInfo.ArgumentList.Add("log");
+        processStartInfo.ArgumentList.Add("--date=short");
+        processStartInfo.ArgumentList.Add("--pretty=format:%h|%ad|%s");
+        processStartInfo.ArgumentList.Add("-n");
+        processStartInfo.ArgumentList.Add(
+            AgentProjectGitHistoryCommitLimit.ToString(CultureInfo.InvariantCulture));
+
+        return processStartInfo;
+    }
+
+    private static void TryKillAgentGitHistoryProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or Win32Exception
+            or NotSupportedException)
+        {
+        }
+    }
+
+    private static IReadOnlyList<string> ParseAgentRecentGitHistory(string rawOutput)
+    {
+        if (string.IsNullOrWhiteSpace(rawOutput))
+        {
+            return [];
+        }
+
+        var commits = new List<string>(AgentProjectGitHistoryCommitLimit);
+        var lines = rawOutput
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Take(AgentProjectGitHistoryCommitLimit);
+
+        foreach (var line in lines)
+        {
+            var parts = line.Split('|', 3, StringSplitOptions.TrimEntries);
+            if (parts.Length == 3)
+            {
+                var hash = parts[0];
+                var date = parts[1];
+                var subject = TruncateAgentProjectContextValue(parts[2], AgentProjectGitSubjectMaxCharacters);
+                if (hash.Length > 0 && date.Length > 0 && subject.Length > 0)
+                {
+                    commits.Add($"{hash} ({date}) {subject}");
+                    continue;
+                }
+            }
+
+            var normalizedLine = TruncateAgentProjectContextValue(
+                line,
+                AgentProjectGitSubjectMaxCharacters + 40);
+            if (normalizedLine.Length > 0)
+            {
+                commits.Add(normalizedLine);
+            }
+        }
+
+        return commits;
+    }
+
+    private static bool IsAgentProjectCodeFile(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return false;
+        }
+
+        if (IsAgentProjectTestFile(relativePath) || IsAgentProjectDocumentationFile(relativePath))
+        {
+            return false;
+        }
+
+        var extension = Path.GetExtension(relativePath);
+        return AgentProjectCodeExtensions.Contains(extension);
+    }
+
+    private static bool IsAgentProjectTestFile(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return false;
+        }
+
+        var normalizedPath = NormalizeAgentProjectRelativePath(relativePath);
+        if (normalizedPath.StartsWith("test/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.StartsWith("tests/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/test/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/tests/", StringComparison.OrdinalIgnoreCase)
+            || normalizedPath.Contains("/__tests__/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var fileName = GetAgentProjectLeafPathSegment(normalizedPath);
+        return fileName.EndsWith("test.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith("tests.cs", StringComparison.OrdinalIgnoreCase)
+            || fileName.Contains(".test.", StringComparison.OrdinalIgnoreCase)
+            || fileName.Contains(".spec.", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("test_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsAgentProjectDocumentationFile(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return false;
+        }
+
+        var normalizedPath = NormalizeAgentProjectRelativePath(relativePath);
+        if (normalizedPath.StartsWith("docs/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var fileName = GetAgentProjectLeafPathSegment(normalizedPath);
+        if (AgentProjectDocumentationFileNames.Contains(fileName))
+        {
+            return true;
+        }
+
+        var extension = Path.GetExtension(fileName);
+        return AgentProjectDocumentationExtensions.Contains(extension);
+    }
+
+    private static string NormalizeAgentProjectRelativePath(string relativePath)
+    {
+        return relativePath
+            .Replace(Path.DirectorySeparatorChar, '/')
+            .Replace(Path.AltDirectorySeparatorChar, '/')
+            .Trim('/');
+    }
+
+    private static string GetAgentProjectLeafPathSegment(string normalizedPath)
+    {
+        var separatorIndex = normalizedPath.LastIndexOf('/');
+        if (separatorIndex < 0)
+        {
+            return normalizedPath;
+        }
+
+        return separatorIndex + 1 >= normalizedPath.Length
+            ? string.Empty
+            : normalizedPath[(separatorIndex + 1)..];
+    }
+
+    private static string TruncateAgentProjectContextValue(string value, int maxCharacters)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = string.Join(
+            " ",
+            value.Split(['\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+        if (normalized.Length <= maxCharacters)
+        {
+            return normalized;
+        }
+
+        var safeMaxCharacters = Math.Max(1, maxCharacters);
+        return $"{normalized[..safeMaxCharacters].TrimEnd()}...";
+    }
+
+    private static string BuildAgentProjectContextPrompt(AgentProjectContextSnapshot projectContext)
+    {
+        var codeSummary = BuildAgentProjectPathSummary(
+            projectContext.CodeFileSamples,
+            projectContext.CodeFileCount,
+            fallback: "nenhum arquivo de codigo identificado.");
+        var testSummary = BuildAgentProjectPathSummary(
+            projectContext.TestFileSamples,
+            projectContext.TestFileCount,
+            fallback: "nenhum arquivo de teste identificado.");
+        var documentationSummary = BuildAgentProjectPathSummary(
+            projectContext.DocumentationFileSamples,
+            projectContext.DocumentationFileCount,
+            fallback: "nenhum arquivo de documentacao identificado.");
+        var gitHistorySummary = projectContext.RecentGitCommits.Count == 0
+            ? projectContext.GitHistorySummary
+            : string.Join(" | ", projectContext.RecentGitCommits);
+
+        return
+            $"""
+            - raiz-workspace: {projectContext.WorkspaceRootDirectory}
+            - tipo-raiz: {GetWorkspaceRootKindLabel(projectContext.WorkspaceRootKind)}
+            - arquivos-indexados: {projectContext.IndexedFileCount}
+            - codigo ({projectContext.CodeFileCount}): {codeSummary}
+            - testes ({projectContext.TestFileCount}): {testSummary}
+            - docs ({projectContext.DocumentationFileCount}): {documentationSummary}
+            - historico git recente: {gitHistorySummary}
+            """;
+    }
+
+    private static string BuildAgentProjectPathSummary(
+        IReadOnlyList<string> samples,
+        int totalCount,
+        string fallback)
+    {
+        if (totalCount <= 0 || samples.Count == 0)
+        {
+            return fallback;
+        }
+
+        var summary = string.Join(", ", samples);
+        if (totalCount <= samples.Count)
+        {
+            return summary;
+        }
+
+        return $"{summary}, ... (+{totalCount - samples.Count})";
+    }
+
+    private static AgentAutonomousLoopState NormalizeAgentAutonomousLoopState(
+        AgentAutonomousLoopState state,
+        int maxSteps)
+    {
+        var boundedMaxSteps = Math.Max(1, maxSteps);
+        var normalizedIteration = state.NextIteration <= 0
+            ? 1
+            : Math.Min(state.NextIteration, boundedMaxSteps);
+        var normalizedElapsed = state.Elapsed < TimeSpan.Zero
+            ? TimeSpan.Zero
+            : state.Elapsed;
+        var normalizedCost = state.AccumulatedCost < 0m
+            ? 0m
+            : state.AccumulatedCost;
+
+        return new AgentAutonomousLoopState(
+            NextIteration: normalizedIteration,
+            PreviousVerificationOutput: state.PreviousVerificationOutput ?? string.Empty,
+            PreviousRefinementOutput: state.PreviousRefinementOutput ?? string.Empty,
+            Elapsed: normalizedElapsed,
+            AccumulatedCost: normalizedCost);
+    }
+
+    private static TimeSpan GetCurrentAgentLoopElapsed(
+        TimeSpan resumedElapsed,
+        Stopwatch stopwatch)
+    {
+        var elapsed = resumedElapsed + stopwatch.Elapsed;
+        return elapsed < TimeSpan.Zero
+            ? TimeSpan.Zero
+            : elapsed;
+    }
+
+    private static void AppendAgentAutonomousLoopCheckpoint(
+        PromptExecutionCheckpointContext checkpointContext,
+        AgentSessionBudget sessionBudget,
+        AgentAutonomousLoopState loopState)
+    {
+        var checkpointPayload = new AgentLoopCheckpointPayload(
+            Kind: AgentLoopCheckpointKind,
+            Version: 1,
+            NextIteration: loopState.NextIteration,
+            MaxSteps: sessionBudget.MaxSteps,
+            MaxTimeSeconds: sessionBudget.MaxTime?.TotalSeconds,
+            MaxCost: sessionBudget.MaxCost,
+            AccumulatedCost: loopState.AccumulatedCost,
+            ElapsedSeconds: loopState.Elapsed.TotalSeconds,
+            PreviousVerificationOutput: BuildPromptContextExcerpt(
+                loopState.PreviousVerificationOutput,
+                string.Empty),
+            PreviousRefinementOutput: BuildPromptContextExcerpt(
+                loopState.PreviousRefinementOutput,
+                string.Empty));
+        var checkpoint = new ExecutionSessionCheckpoint(
+            TimestampUtc: DateTimeOffset.UtcNow,
+            SessionId: checkpointContext.SessionId,
+            Command: checkpointContext.Command,
+            Stage: AgentLoopCheckpointStage,
+            Status: ExecutionCheckpointStatus.InProgress,
+            Prompt: checkpointContext.Prompt,
+            Model: checkpointContext.Model,
+            SkillName: checkpointContext.SkillName,
+            Detail: JsonSerializer.Serialize(checkpointPayload));
+        TryAppendExecutionCheckpoint(checkpoint, checkpointContext.ExecutionCheckpointAppender);
+    }
+
+    private static AgentAutonomousLoopResult? ResolveBudgetExceededResult(
+        AgentSessionBudget sessionBudget,
+        int iteration,
+        TimeSpan elapsed,
+        decimal accumulatedCost)
+    {
+        if (sessionBudget.MaxTime is TimeSpan maxTime
+            && elapsed > maxTime)
+        {
+            return AgentAutonomousLoopResult.MaxTimeExceeded(
+                iteration,
+                elapsed,
+                accumulatedCost);
+        }
+
+        if (sessionBudget.MaxCost is decimal maxCost
+            && accumulatedCost > maxCost)
+        {
+            return AgentAutonomousLoopResult.MaxCostExceeded(
+                iteration,
+                elapsed,
+                accumulatedCost);
+        }
+
+        return null;
+    }
+
+    private static decimal EstimateAgentStepCost(
+        string prompt,
+        PromptStreamMetrics streamMetrics)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+
+        var promptCharacterCount = prompt.Length;
+        var responseCharacterCount = Math.Max(0, streamMetrics.CharacterCount);
+        return promptCharacterCount + responseCharacterCount;
+    }
+
+    private static string FormatOptionalBudgetDuration(TimeSpan? duration)
+    {
+        return duration is TimeSpan value
+            ? FormatRequiredBudgetDuration(value)
+            : "sem-limite";
+    }
+
+    private static string FormatRequiredBudgetDuration(TimeSpan? duration)
+    {
+        return duration is TimeSpan value
+            ? FormatRequiredBudgetDuration(value)
+            : "0s";
+    }
+
+    private static string FormatRequiredBudgetDuration(TimeSpan duration)
+    {
+        return $"{duration.TotalSeconds:0.###}s";
+    }
+
+    private static string FormatOptionalBudgetValue(decimal? value)
+    {
+        return value is decimal budgetValue
+            ? FormatRequiredBudgetValue(budgetValue)
+            : "sem-limite";
+    }
+
+    private static string FormatRequiredBudgetValue(decimal? value)
+    {
+        return value is decimal budgetValue
+            ? FormatRequiredBudgetValue(budgetValue)
+            : "0";
+    }
+
+    private static string FormatRequiredBudgetValue(decimal value)
+    {
+        return value.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     private static int ExecuteResume(
@@ -2324,12 +3724,14 @@ internal static class Program
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
-        Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader)
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader,
+        IToolRuntime toolRuntime)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(cancelSignalRegistration);
         ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
         ArgumentNullException.ThrowIfNull(executionCheckpointLoader);
+        ArgumentNullException.ThrowIfNull(toolRuntime);
 
         ConsoleLogger.Info("Buscando checkpoint de sessao interrompida.");
 
@@ -2427,12 +3829,35 @@ internal static class Program
 
         if (string.Equals(checkpointToResume.Command, "agent", StringComparison.OrdinalIgnoreCase))
         {
+            if (TryResolveAgentResumeCheckpointState(checkpoints, checkpointToResume, out var resumeCheckpointState))
+            {
+                return ExecuteAgent(
+                    checkpointToResume.Prompt,
+                    checkpointToResume.Model,
+                    maxSteps: resumeCheckpointState.SessionBudget.MaxSteps,
+                    maxTime: resumeCheckpointState.SessionBudget.MaxTime,
+                    maxCost: resumeCheckpointState.SessionBudget.MaxCost,
+                    promptExecutor,
+                    cancelSignalRegistration,
+                    executionCheckpointAppender,
+                    toolRuntime,
+                    resumeLoopState: resumeCheckpointState.LoopState,
+                    checkpointSessionId: checkpointToResume.SessionId);
+            }
+
+            ConsoleLogger.Info(
+                "Checkpoint do agente sem metadados de retomada incremental. Reiniciando loop a partir da iteracao 1.");
             return ExecuteAgent(
                 checkpointToResume.Prompt,
                 checkpointToResume.Model,
+                maxSteps: null,
+                maxTime: null,
+                maxCost: null,
                 promptExecutor,
                 cancelSignalRegistration,
-                executionCheckpointAppender);
+                executionCheckpointAppender,
+                toolRuntime,
+                checkpointSessionId: checkpointToResume.SessionId);
         }
 
         return ExecuteSkill(
@@ -2481,6 +3906,134 @@ internal static class Program
 
         return string.Equals(checkpoint.Command, "skill", StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(checkpoint.SkillName);
+    }
+
+    private static bool TryResolveAgentResumeCheckpointState(
+        IReadOnlyList<ExecutionSessionCheckpoint> checkpoints,
+        ExecutionSessionCheckpoint checkpointToResume,
+        out AgentResumeCheckpointState resumeCheckpointState)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoints);
+
+        foreach (var checkpoint in checkpoints.OrderByDescending(static checkpoint => checkpoint.TimestampUtc))
+        {
+            if (!string.Equals(
+                checkpoint.SessionId,
+                checkpointToResume.SessionId,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!string.Equals(checkpoint.Command, "agent", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!string.Equals(
+                checkpoint.Stage,
+                AgentLoopCheckpointStage,
+                StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!TryParseAgentLoopCheckpointPayload(checkpoint.Detail, out resumeCheckpointState))
+            {
+                continue;
+            }
+
+            ConsoleLogger.Info(
+                $"Checkpoint incremental do agente identificado: iteracao {resumeCheckpointState.LoopState.NextIteration}/{resumeCheckpointState.SessionBudget.MaxSteps}.");
+            return true;
+        }
+
+        resumeCheckpointState = default;
+        return false;
+    }
+
+    private static bool TryParseAgentLoopCheckpointPayload(
+        string checkpointDetail,
+        out AgentResumeCheckpointState resumeCheckpointState)
+    {
+        resumeCheckpointState = default;
+
+        if (string.IsNullOrWhiteSpace(checkpointDetail))
+        {
+            return false;
+        }
+
+        AgentLoopCheckpointPayloadDocument? payloadDocument;
+        try
+        {
+            payloadDocument = JsonSerializer.Deserialize<AgentLoopCheckpointPayloadDocument>(checkpointDetail);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        if (payloadDocument is null
+            || !string.Equals(payloadDocument.Kind, AgentLoopCheckpointKind, StringComparison.OrdinalIgnoreCase)
+            || payloadDocument.Version != 1
+            || payloadDocument.NextIteration is not int nextIteration
+            || nextIteration <= 0
+            || payloadDocument.MaxSteps is not int maxSteps
+            || maxSteps <= 0)
+        {
+            return false;
+        }
+
+        TimeSpan? maxTime = null;
+        if (payloadDocument.MaxTimeSeconds is double maxTimeSeconds)
+        {
+            if (!double.IsFinite(maxTimeSeconds) || maxTimeSeconds <= 0d)
+            {
+                return false;
+            }
+
+            maxTime = TimeSpan.FromSeconds(maxTimeSeconds);
+        }
+
+        decimal? maxCost = null;
+        if (payloadDocument.MaxCost is decimal maxCostValue)
+        {
+            if (maxCostValue <= 0m)
+            {
+                return false;
+            }
+
+            maxCost = maxCostValue;
+        }
+
+        var accumulatedCost = payloadDocument.AccumulatedCost ?? 0m;
+        if (accumulatedCost < 0m)
+        {
+            accumulatedCost = 0m;
+        }
+
+        var elapsedSeconds = payloadDocument.ElapsedSeconds ?? 0d;
+        if (!double.IsFinite(elapsedSeconds) || elapsedSeconds < 0d)
+        {
+            elapsedSeconds = 0d;
+        }
+
+        var loopState = NormalizeAgentAutonomousLoopState(
+            new AgentAutonomousLoopState(
+                NextIteration: Math.Min(Math.Max(1, nextIteration), maxSteps),
+                PreviousVerificationOutput: payloadDocument.PreviousVerificationOutput ?? string.Empty,
+                PreviousRefinementOutput: payloadDocument.PreviousRefinementOutput ?? string.Empty,
+                Elapsed: TimeSpan.FromSeconds(elapsedSeconds),
+                AccumulatedCost: accumulatedCost),
+            maxSteps);
+
+        resumeCheckpointState = new AgentResumeCheckpointState(
+            SessionBudget: new AgentSessionBudget(
+                MaxSteps: maxSteps,
+                MaxTime: maxTime,
+                MaxCost: maxCost),
+            LoopState: loopState);
+        return true;
     }
 
     private static int ExecuteChat(
@@ -2909,6 +4462,22 @@ internal static class Program
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         PromptExecutionCheckpointContext? checkpointContext = null)
     {
+        var result = ExecutePromptAndCapture(
+            prompt,
+            model,
+            promptExecutor,
+            cancelSignalRegistration,
+            checkpointContext);
+        return result.WasCancelled;
+    }
+
+    private static PromptExecutionResult ExecutePromptAndCapture(
+        string prompt,
+        string? model,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
+        PromptExecutionCheckpointContext? checkpointContext = null)
+    {
         using var cancellationTokenSource = new CancellationTokenSource();
         using var cancelRegistration = cancelSignalRegistration(
             cancellationTokenSource,
@@ -2940,7 +4509,9 @@ internal static class Program
                 $"Resposta finalizada com {streamMetrics.ChunkCount} bloco(s) de streaming.",
                 checkpointContext,
                 ExecutionCheckpointStatus.Completed);
-            return false;
+            return new PromptExecutionResult(
+                WasCancelled: false,
+                StreamMetrics: streamMetrics);
         }
         catch (OperationCanceledException) when (cancellationTokenSource.IsCancellationRequested)
         {
@@ -2949,7 +4520,9 @@ internal static class Program
                 "Execucao cancelada pelo usuario.",
                 checkpointContext,
                 ExecutionCheckpointStatus.Cancelled);
-            return true;
+            return new PromptExecutionResult(
+                WasCancelled: true,
+                StreamMetrics: PromptStreamMetrics.Empty);
         }
         catch (Exception ex)
         {
@@ -3902,25 +5475,521 @@ internal static class Program
             """;
     }
 
-    private static string BuildAgentPrompt(string objective)
+    private static string BuildAgentPlanPhasePrompt(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        string previousVerificationOutput,
+        string previousRefinementOutput)
     {
-        var executionPlan = AgentObjectivePlanner.Build(objective);
+        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "plan");
+
+        return
+            $"""
+            {basePrompt}
+            [CONTEXTO DA ITERACAO ANTERIOR]
+            Ultima verificacao:
+            {BuildPromptContextExcerpt(previousVerificationOutput, "Sem verificacao previa.")}
+
+            Ultimo refinamento:
+            {BuildPromptContextExcerpt(previousRefinementOutput, "Sem refinamento previo.")}
+
+            [TAREFA DA FASE PLAN]
+            Atualize o plano tatico da iteracao atual.
+            Defina escopo, riscos e criterios objetivos para validar a entrega.
+            Responda de forma direta, com foco em executar no proximo passo.
+            """;
+    }
+
+    private static string BuildAgentExecutePhasePrompt(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        string latestPlanOutput,
+        string previousRefinementOutput)
+    {
+        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "execute");
+
+        return
+            $"""
+            {basePrompt}
+            [PLANO TATICO ATUAL]
+            {BuildPromptContextExcerpt(latestPlanOutput, "Plano tatico nao disponivel.")}
+
+            [AJUSTES DO ULTIMO REFINE]
+            {BuildPromptContextExcerpt(previousRefinementOutput, "Sem ajustes de refine para aplicar.")}
+
+            [TAREFA DA FASE EXECUTE]
+            Execute o plano definido para esta iteracao.
+            Entregue evidencias concretas do que foi feito e do que ficou pendente.
+            Quando houver mudanca de codigo, use obrigatoriamente o formato abaixo:
+
+            CODE_CHANGE_STATUS=<changed|no-change>
+
+            Para cada arquivo alterado, repita:
+            CHANGE_FILE=<caminho-relativo>
+            CHANGE_KIND=<create|edit|delete|move|rename|test|docs|infra|other>
+            ```diff
+            <diff unificado da mudanca>
+            ```
+            TECHNICAL_JUSTIFICATION=<justificativa tecnica curta da mudanca>
+
+            Regras:
+            - Se CODE_CHANGE_STATUS=changed, cada CHANGE_FILE deve conter diff e TECHNICAL_JUSTIFICATION proprios.
+            - Se nao houver alteracao de codigo, declare CODE_CHANGE_STATUS=no-change e explique as evidencias coletadas.
+            """;
+    }
+
+    private static string BuildAgentVerifyPhasePrompt(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        string latestPlanOutput,
+        string latestExecutionOutput,
+        AgentCodeChangeEvidence executeEvidence,
+        AgentValidationReport validationReport)
+    {
+        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "verify");
+
+        return
+            $"""
+            {basePrompt}
+            [PLANO A VALIDAR]
+            {BuildPromptContextExcerpt(latestPlanOutput, "Plano tatico nao disponivel.")}
+
+            [EVIDENCIAS DE EXECUCAO]
+            {BuildPromptContextExcerpt(latestExecutionOutput, "Sem evidencias de execucao disponiveis.")}
+
+            [RASTREABILIDADE DE MUDANCAS DE CODIGO]
+            {BuildAgentCodeChangeEvidenceSummary(executeEvidence)}
+
+            [VALIDACAO AUTOMATICA POS-MUDANCA]
+            {BuildAgentValidationReportSummary(validationReport)}
+
+            [TAREFA DA FASE VERIFY]
+            Verifique se o objetivo ja pode ser considerado concluido.
+            Se houver alteracao de codigo sem diff ou sem justificativa tecnica por mudanca, marque refine.
+            Se a validacao automatica pos-mudanca falhou, marque refine e use stdout/stderr para orientar a correcao.
+            Se ainda houver lacunas, descreva o que precisa ser refinado.
+            Comece obrigatoriamente com:
+            VERIFICATION_STATUS=<done|refine>
+            Depois explique a justificativa em topicos curtos.
+            """;
+    }
+
+    private static string BuildAgentAutoCorrectionPrompt(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        string latestPlanOutput,
+        string latestExecutionOutput,
+        AgentValidationReport validationReport,
+        int attempt,
+        int maxAttempts)
+    {
+        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "auto-correct");
+
+        return
+            $"""
+            {basePrompt}
+            [PLANO TATICO]
+            {BuildPromptContextExcerpt(latestPlanOutput, "Plano tatico nao disponivel.")}
+
+            [EXECUCAO QUE GEROU FALHA]
+            {BuildPromptContextExcerpt(latestExecutionOutput, "Sem contexto de execucao anterior.")}
+
+            [VALIDACAO AUTOMATICA COM FALHA]
+            {BuildAgentValidationReportSummary(validationReport)}
+
+            [TENTATIVA DE AUTO-CORRECAO]
+            Tentativa: {attempt}/{maxAttempts}
+
+            [TAREFA DA FASE AUTO-CORRECAO]
+            Corrija somente as causas objetivas indicadas por stdout/stderr da validacao.
+            Preserve o escopo do objetivo e evite refatoracoes sem relacao com a falha.
+            Apos corrigir, declare obrigatoriamente o resultado no formato abaixo:
+
+            CODE_CHANGE_STATUS=<changed|no-change>
+
+            Para cada arquivo alterado, repita:
+            CHANGE_FILE=<caminho-relativo>
+            CHANGE_KIND=<create|edit|delete|move|rename|test|docs|infra|other>
+            ```diff
+            <diff unificado da mudanca>
+            ```
+            TECHNICAL_JUSTIFICATION=<por que esta mudanca corrige a falha>
+
+            Regras:
+            - Se CODE_CHANGE_STATUS=changed, cada CHANGE_FILE deve conter diff e TECHNICAL_JUSTIFICATION proprios.
+            - Se nao houver alteracao possivel nesta tentativa, declare CODE_CHANGE_STATUS=no-change e explique o bloqueio tecnico.
+            """;
+    }
+
+    private static string BuildAgentRefinePhasePrompt(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        string latestPlanOutput,
+        string latestExecutionOutput,
+        string latestVerificationOutput)
+    {
+        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "refine");
+
+        return
+            $"""
+            {basePrompt}
+            [PLANO TATICO]
+            {BuildPromptContextExcerpt(latestPlanOutput, "Plano tatico nao disponivel.")}
+
+            [EXECUCAO ANTERIOR]
+            {BuildPromptContextExcerpt(latestExecutionOutput, "Sem contexto de execucao anterior.")}
+
+            [FEEDBACK DA VERIFICACAO]
+            {BuildPromptContextExcerpt(latestVerificationOutput, "Sem feedback de verificacao.")}
+
+            [TAREFA DA FASE REFINE]
+            Corrija as lacunas apontadas na verificacao.
+            Replaneje somente o necessario para destravar a proxima iteracao.
+            Produza instrucoes objetivas para a proxima fase plan/execute.
+            """;
+    }
+
+    private static AgentVerificationDecision ParseAgentVerificationDecision(string verificationOutput)
+    {
+        if (TryParseAgentVerificationStatus(verificationOutput, out var status))
+        {
+            return string.Equals(status, AgentVerificationStatusDone, StringComparison.OrdinalIgnoreCase)
+                ? AgentVerificationDecision.Concluded(status)
+                : AgentVerificationDecision.NeedsRefine(status);
+        }
+
+        if (verificationOutput.Contains("nao concluido", StringComparison.OrdinalIgnoreCase)
+            || verificationOutput.Contains("not concluded", StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentVerificationDecision.NeedsRefine("heuristic");
+        }
+
+        if (verificationOutput.Contains("concluido", StringComparison.OrdinalIgnoreCase)
+            || verificationOutput.Contains("objective completed", StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentVerificationDecision.Concluded("heuristic");
+        }
+
+        ConsoleLogger.Info(
+            "Nao foi possivel identificar status explicito de verify. Assumindo conclusao.");
+        return AgentVerificationDecision.Concluded("assumed");
+    }
+
+    private static bool TryParseAgentVerificationStatus(string verificationOutput, out string status)
+    {
+        status = string.Empty;
+        if (string.IsNullOrWhiteSpace(verificationOutput))
+        {
+            return false;
+        }
+
+        const string statusPrefix = "VERIFICATION_STATUS=";
+        var lines = verificationOutput
+            .Replace("\r", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var line in lines)
+        {
+            if (!line.StartsWith(statusPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var rawStatus = line[statusPrefix.Length..].Trim();
+            var normalizedStatus = rawStatus.Trim(
+                '"',
+                '\'',
+                '`',
+                '.',
+                ',',
+                ';',
+                ':',
+                '!',
+                '?',
+                '(',
+                ')',
+                '[',
+                ']',
+                '{',
+                '}',
+                '<',
+                '>');
+            if (string.Equals(normalizedStatus, AgentVerificationStatusDone, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(normalizedStatus, AgentVerificationStatusRefine, StringComparison.OrdinalIgnoreCase))
+            {
+                status = normalizedStatus;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static AgentCodeChangeEvidence ParseAgentCodeChangeEvidence(string executionOutput)
+    {
+        if (string.IsNullOrWhiteSpace(executionOutput))
+        {
+            return AgentCodeChangeEvidence.Empty;
+        }
+
+        const string statusPrefix = "CODE_CHANGE_STATUS=";
+        const string changeFilePrefix = "CHANGE_FILE=";
+        const string technicalJustificationPrefix = "TECHNICAL_JUSTIFICATION=";
+        const string technicalJustificationAliasPrefix = "JUSTIFICATIVA_TECNICA=";
+
+        var normalizedOutput = executionOutput.Replace("\r", "\n", StringComparison.Ordinal);
+        var lines = normalizedOutput.Split('\n', StringSplitOptions.TrimEntries);
+
+        var status = AgentCodeChangeStatusUnknown;
+        var changeFileCount = 0;
+        var diffBlockCount = 0;
+        var technicalJustificationCount = 0;
+        var insideDiffFence = false;
+        var containsStructuredOutput = false;
+
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            if (line.StartsWith(statusPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                status = NormalizeAgentCodeChangeStatus(line[statusPrefix.Length..]);
+                containsStructuredOutput = true;
+                continue;
+            }
+
+            if (line.StartsWith(changeFilePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                changeFileCount++;
+                containsStructuredOutput = true;
+                continue;
+            }
+
+            if (line.StartsWith(technicalJustificationPrefix, StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith(technicalJustificationAliasPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                technicalJustificationCount++;
+                containsStructuredOutput = true;
+                continue;
+            }
+
+            if (line.StartsWith("```diff", StringComparison.OrdinalIgnoreCase))
+            {
+                insideDiffFence = true;
+                continue;
+            }
+
+            if (insideDiffFence && line.StartsWith("```", StringComparison.Ordinal))
+            {
+                insideDiffFence = false;
+                diffBlockCount++;
+            }
+        }
+
+        if (insideDiffFence)
+        {
+            diffBlockCount++;
+        }
+
+        if (diffBlockCount == 0
+            && (normalizedOutput.Contains("diff --git", StringComparison.Ordinal)
+                || normalizedOutput.Contains("\n@@", StringComparison.Ordinal)
+                || normalizedOutput.StartsWith("@@", StringComparison.Ordinal)))
+        {
+            diffBlockCount = 1;
+        }
+
+        return new AgentCodeChangeEvidence(
+            Status: status,
+            ChangeFileCount: changeFileCount,
+            DiffBlockCount: diffBlockCount,
+            TechnicalJustificationCount: technicalJustificationCount,
+            ContainsStructuredOutput: containsStructuredOutput);
+    }
+
+    private static string NormalizeAgentCodeChangeStatus(string rawStatus)
+    {
+        var normalizedStatus = rawStatus.Trim().Trim(
+            '"',
+            '\'',
+            '`',
+            '.',
+            ',',
+            ';',
+            ':',
+            '!',
+            '?',
+            '(',
+            ')',
+            '[',
+            ']',
+            '{',
+            '}',
+            '<',
+            '>');
+        if (string.Equals(normalizedStatus, AgentCodeChangeStatusChanged, StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentCodeChangeStatusChanged;
+        }
+
+        if (string.Equals(normalizedStatus, AgentCodeChangeStatusNoChange, StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentCodeChangeStatusNoChange;
+        }
+
+        return AgentCodeChangeStatusUnknown;
+    }
+
+    private static string BuildAgentCodeChangeEvidenceSummary(AgentCodeChangeEvidence evidence)
+    {
+        if (evidence.DeclaredNoCodeChanges && evidence.IsCompliant)
+        {
+            return "Execucao declarou CODE_CHANGE_STATUS=no-change e sem alteracoes estruturadas.";
+        }
+
+        if (!evidence.RequiresValidation)
+        {
+            return "Execucao sem declaracao estruturada de alteracao de codigo.";
+        }
+
+        return
+            $"status={evidence.Status}; arquivos={evidence.ChangeFileCount}; " +
+            $"diffs={evidence.DiffBlockCount}; justificativas={evidence.TechnicalJustificationCount}; " +
+            $"saida_estruturada={(evidence.ContainsStructuredOutput ? "sim" : "nao")}; " +
+            $"conformidade={(evidence.IsCompliant ? "ok" : "incompleta")}.";
+    }
+
+    private static string BuildAgentValidationReportSummary(AgentValidationReport validationReport)
+    {
+        if (!validationReport.WasRequired)
+        {
+            return "Nao executada: a fase execute nao declarou bloco de mudancas validavel.";
+        }
+
+        if (!validationReport.CommandsDiscovered)
+        {
+            return "Nao executada: nenhum comando build/test/lint foi descoberto para este workspace.";
+        }
+
+        var builder = new StringBuilder();
+        builder.AppendLine(validationReport.HasFailures
+            ? "Status geral: failed."
+            : "Status geral: passed.");
+
+        foreach (var result in validationReport.Results)
+        {
+            builder.AppendLine(
+                $"- {result.Name}: {(result.IsSuccess ? "passed" : "failed")} " +
+                $"(exit_code={result.ExitCode}, duracao={FormatRequiredBudgetDuration(result.Duration)}, " +
+                $"comando=\"{result.CommandLine}\").");
+
+            if (!string.IsNullOrWhiteSpace(result.StdOut))
+            {
+                builder.AppendLine(
+                    $"  stdout: {BuildPromptContextExcerpt(result.StdOut, "<vazio>", AgentValidationOutputExcerptMaxCharacters)}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(result.StdErr))
+            {
+                builder.AppendLine(
+                    $"  stderr: {BuildPromptContextExcerpt(result.StdErr, "<vazio>", AgentValidationOutputExcerptMaxCharacters)}");
+            }
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string BuildAgentCodeChangeEvidenceLogMessage(AgentCodeChangeEvidence evidence)
+    {
+        if (!evidence.RequiresValidation && !evidence.DeclaredNoCodeChanges)
+        {
+            return "Fase execute sem mudancas de codigo estruturadas declaradas.";
+        }
+
+        return $"Fase execute: {BuildAgentCodeChangeEvidenceSummary(evidence)}";
+    }
+
+    private static string BuildAgentAutoCorrectionEvidenceLogMessage(
+        int attempt,
+        AgentCodeChangeEvidence evidence)
+    {
+        if (!evidence.RequiresValidation && !evidence.DeclaredNoCodeChanges)
+        {
+            return
+                $"Auto-correcao de validacao: tentativa {attempt} sem mudancas de codigo estruturadas declaradas.";
+        }
+
+        return
+            $"Auto-correcao de validacao: tentativa {attempt}: {BuildAgentCodeChangeEvidenceSummary(evidence)}";
+    }
+
+    private static string BuildAgentPromptBase(
+        AgentExecutionPlan executionPlan,
+        AgentProjectContextSnapshot projectContext,
+        int iteration,
+        string phase)
+    {
+        var projectContextSection = BuildAgentProjectContextPrompt(projectContext);
         var executionPlanSection = BuildAgentExecutionPlanSection(executionPlan);
 
         return
             $"""
             [MODO: AGENTE AUTONOMO]
             Atue como um desenvolvedor senior com foco em entrega.
-            Siga o ciclo: planejar -> executar -> verificar -> refinar.
+            Siga o ciclo: plan -> execute -> verify -> refine.
             Explique premissas, riscos e proximos passos de forma objetiva.
-            Quando faltar contexto, informe claramente e proponha a acao mais util.
+            Quando faltar contexto, sinalize a lacuna e proponha uma acao util.
+
+            [CICLO]
+            Iteracao: {iteration}
+            Fase atual: {phase}
 
             [OBJETIVO]
             {executionPlan.Objective}
 
+            [CONTEXTO DE ENGENHARIA DO PROJETO]
+            {projectContextSection}
+
             [PLANO DE EXECUCAO POR ETAPAS]
             {executionPlanSection}
             """;
+    }
+
+    private static string BuildPromptContextExcerpt(string value, string fallbackValue)
+    {
+        return BuildPromptContextExcerpt(
+            value,
+            fallbackValue,
+            AgentPromptContextExcerptMaxCharacters);
+    }
+
+    private static string BuildPromptContextExcerpt(
+        string value,
+        string fallbackValue,
+        int maxCharacters)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallbackValue;
+        }
+
+        var normalizedValue = value.Trim();
+        var safeMaxCharacters = Math.Max(1, maxCharacters);
+        if (normalizedValue.Length <= safeMaxCharacters)
+        {
+            return normalizedValue;
+        }
+
+        var startIndex = normalizedValue.Length - safeMaxCharacters;
+        return $"[...] {normalizedValue[startIndex..]}";
     }
 
     private static string BuildAgentExecutionPlanSection(AgentExecutionPlan executionPlan)
@@ -3947,14 +6016,17 @@ internal static class Program
         string prompt,
         string? model,
         string? skillName,
-        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
+        string? sessionId = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(command);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
 
         return new PromptExecutionCheckpointContext(
-            SessionId: Guid.NewGuid().ToString("N"),
+            SessionId: string.IsNullOrWhiteSpace(sessionId)
+                ? Guid.NewGuid().ToString("N")
+                : sessionId.Trim(),
             Command: command.Trim(),
             Prompt: prompt.Trim(),
             Model: string.IsNullOrWhiteSpace(model) ? null : model.Trim(),
@@ -4221,6 +6293,7 @@ internal static class Program
         var chunkCount = 0;
         var characterCount = 0;
         var containsDiffMarkers = false;
+        var responseTextBuilder = new StringBuilder();
         var currentDesignSystem = ConsoleLogger.CurrentDesignSystem;
         var responseRenderer = new TerminalResponseRenderer(
             AnsiTerminalRenderer.CreateDefault(currentDesignSystem),
@@ -4238,6 +6311,7 @@ internal static class Program
                 chunkCount++;
                 characterCount += chunk.Length;
                 containsDiffMarkers = containsDiffMarkers || ContainsDiffMarkers(chunk);
+                responseTextBuilder.Append(chunk);
 
                 var renderedChunk = responseRenderer.RenderChunk(chunk);
                 if (renderedChunk.Length == 0)
@@ -4267,7 +6341,8 @@ internal static class Program
         return new PromptStreamMetrics(
             ChunkCount: chunkCount,
             CharacterCount: characterCount,
-            ContainsDiffMarkers: containsDiffMarkers);
+            ContainsDiffMarkers: containsDiffMarkers,
+            ResponseText: responseTextBuilder.ToString());
     }
 
     private static string BuildDiffStateDetail(PromptStreamMetrics streamMetrics)
@@ -5071,11 +7146,280 @@ internal static class Program
     private readonly record struct PromptStreamMetrics(
         int ChunkCount,
         int CharacterCount,
-        bool ContainsDiffMarkers);
+        bool ContainsDiffMarkers,
+        string ResponseText)
+    {
+        public static PromptStreamMetrics Empty => new(
+            ChunkCount: 0,
+            CharacterCount: 0,
+            ContainsDiffMarkers: false,
+            ResponseText: string.Empty);
+    }
+
+    private readonly record struct PromptExecutionResult(
+        bool WasCancelled,
+        PromptStreamMetrics StreamMetrics);
+
+    private readonly record struct AgentCodeChangeEvidence(
+        string Status,
+        int ChangeFileCount,
+        int DiffBlockCount,
+        int TechnicalJustificationCount,
+        bool ContainsStructuredOutput)
+    {
+        public static AgentCodeChangeEvidence Empty => new(
+            Status: AgentCodeChangeStatusUnknown,
+            ChangeFileCount: 0,
+            DiffBlockCount: 0,
+            TechnicalJustificationCount: 0,
+            ContainsStructuredOutput: false);
+
+        public bool HasDeclaredCodeChanges =>
+            string.Equals(Status, AgentCodeChangeStatusChanged, StringComparison.OrdinalIgnoreCase);
+
+        public bool DeclaredNoCodeChanges =>
+            string.Equals(Status, AgentCodeChangeStatusNoChange, StringComparison.OrdinalIgnoreCase);
+
+        public bool RequiresValidation =>
+            HasDeclaredCodeChanges
+            || ChangeFileCount > 0
+            || DiffBlockCount > 0
+            || TechnicalJustificationCount > 0;
+
+        public bool IsCompliant
+        {
+            get
+            {
+                if (DeclaredNoCodeChanges)
+                {
+                    return ChangeFileCount == 0
+                        && DiffBlockCount == 0
+                        && TechnicalJustificationCount == 0;
+                }
+
+                if (!RequiresValidation)
+                {
+                    return true;
+                }
+
+                return ChangeFileCount > 0
+                    && DiffBlockCount >= ChangeFileCount
+                    && TechnicalJustificationCount >= ChangeFileCount;
+            }
+        }
+    }
+
+    private readonly record struct AgentAutoCorrectionResult(
+        bool WasCancelled,
+        string LatestExecutionOutput,
+        AgentCodeChangeEvidence LatestChangeEvidence,
+        AgentValidationReport ValidationReport,
+        decimal AdditionalCost)
+    {
+        public static AgentAutoCorrectionResult NotRequired(
+            string latestExecutionOutput,
+            AgentCodeChangeEvidence latestChangeEvidence,
+            AgentValidationReport validationReport)
+        {
+            return new AgentAutoCorrectionResult(
+                WasCancelled: false,
+                LatestExecutionOutput: latestExecutionOutput,
+                LatestChangeEvidence: latestChangeEvidence,
+                ValidationReport: validationReport,
+                AdditionalCost: 0m);
+        }
+
+        public static AgentAutoCorrectionResult Cancelled(
+            string latestExecutionOutput,
+            AgentCodeChangeEvidence latestChangeEvidence,
+            AgentValidationReport validationReport,
+            decimal additionalCost)
+        {
+            return new AgentAutoCorrectionResult(
+                WasCancelled: true,
+                LatestExecutionOutput: latestExecutionOutput,
+                LatestChangeEvidence: latestChangeEvidence,
+                ValidationReport: validationReport,
+                AdditionalCost: additionalCost < 0m ? 0m : additionalCost);
+        }
+    }
+
+    private enum AgentBudgetLimitKind
+    {
+        None,
+        MaxTime,
+        MaxCost
+    }
+
+    private readonly record struct AgentSessionBudget(
+        int MaxSteps,
+        TimeSpan? MaxTime,
+        decimal? MaxCost);
+
+    private readonly record struct AgentProjectContextSnapshot(
+        string WorkspaceRootDirectory,
+        WorkspaceRootKind WorkspaceRootKind,
+        int IndexedFileCount,
+        int CodeFileCount,
+        int TestFileCount,
+        int DocumentationFileCount,
+        IReadOnlyList<string> CodeFileSamples,
+        IReadOnlyList<string> TestFileSamples,
+        IReadOnlyList<string> DocumentationFileSamples,
+        IReadOnlyList<string> RecentGitCommits,
+        string GitHistorySummary);
+
+    private readonly record struct AgentAutonomousLoopState(
+        int NextIteration,
+        string PreviousVerificationOutput,
+        string PreviousRefinementOutput,
+        TimeSpan Elapsed,
+        decimal AccumulatedCost)
+    {
+        public static AgentAutonomousLoopState Initial => new(
+            NextIteration: 1,
+            PreviousVerificationOutput: string.Empty,
+            PreviousRefinementOutput: string.Empty,
+            Elapsed: TimeSpan.Zero,
+            AccumulatedCost: 0m);
+    }
+
+    private readonly record struct AgentResumeCheckpointState(
+        AgentSessionBudget SessionBudget,
+        AgentAutonomousLoopState LoopState);
+
+    private readonly record struct AgentLoopCheckpointPayload(
+        string Kind,
+        int Version,
+        int NextIteration,
+        int MaxSteps,
+        double? MaxTimeSeconds,
+        decimal? MaxCost,
+        decimal AccumulatedCost,
+        double ElapsedSeconds,
+        string PreviousVerificationOutput,
+        string PreviousRefinementOutput);
+
+    private readonly record struct AgentAutonomousLoopResult(
+        bool WasCancelled,
+        bool IsConcluded,
+        int IterationCount,
+        TimeSpan Elapsed,
+        decimal AccumulatedCost,
+        AgentBudgetLimitKind BudgetLimitKind)
+    {
+        public static AgentAutonomousLoopResult Cancelled(
+            int iterationCount,
+            TimeSpan elapsed,
+            decimal accumulatedCost)
+        {
+            return new AgentAutonomousLoopResult(
+                WasCancelled: true,
+                IsConcluded: false,
+                IterationCount: Math.Max(1, iterationCount),
+                Elapsed: elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed,
+                AccumulatedCost: accumulatedCost < 0m ? 0m : accumulatedCost,
+                BudgetLimitKind: AgentBudgetLimitKind.None);
+        }
+
+        public static AgentAutonomousLoopResult Concluded(
+            int iterationCount,
+            TimeSpan elapsed,
+            decimal accumulatedCost)
+        {
+            return new AgentAutonomousLoopResult(
+                WasCancelled: false,
+                IsConcluded: true,
+                IterationCount: Math.Max(1, iterationCount),
+                Elapsed: elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed,
+                AccumulatedCost: accumulatedCost < 0m ? 0m : accumulatedCost,
+                BudgetLimitKind: AgentBudgetLimitKind.None);
+        }
+
+        public static AgentAutonomousLoopResult NotConcluded(
+            int iterationCount,
+            TimeSpan elapsed,
+            decimal accumulatedCost)
+        {
+            return new AgentAutonomousLoopResult(
+                WasCancelled: false,
+                IsConcluded: false,
+                IterationCount: Math.Max(1, iterationCount),
+                Elapsed: elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed,
+                AccumulatedCost: accumulatedCost < 0m ? 0m : accumulatedCost,
+                BudgetLimitKind: AgentBudgetLimitKind.None);
+        }
+
+        public static AgentAutonomousLoopResult MaxTimeExceeded(
+            int iterationCount,
+            TimeSpan elapsed,
+            decimal accumulatedCost)
+        {
+            return new AgentAutonomousLoopResult(
+                WasCancelled: false,
+                IsConcluded: false,
+                IterationCount: Math.Max(1, iterationCount),
+                Elapsed: elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed,
+                AccumulatedCost: accumulatedCost < 0m ? 0m : accumulatedCost,
+                BudgetLimitKind: AgentBudgetLimitKind.MaxTime);
+        }
+
+        public static AgentAutonomousLoopResult MaxCostExceeded(
+            int iterationCount,
+            TimeSpan elapsed,
+            decimal accumulatedCost)
+        {
+            return new AgentAutonomousLoopResult(
+                WasCancelled: false,
+                IsConcluded: false,
+                IterationCount: Math.Max(1, iterationCount),
+                Elapsed: elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed,
+                AccumulatedCost: accumulatedCost < 0m ? 0m : accumulatedCost,
+                BudgetLimitKind: AgentBudgetLimitKind.MaxCost);
+        }
+    }
+
+    private readonly record struct AgentVerificationDecision(
+        bool IsConcluded,
+        string Status)
+    {
+        public static AgentVerificationDecision Concluded(string status)
+        {
+            return new AgentVerificationDecision(IsConcluded: true, Status: status);
+        }
+
+        public static AgentVerificationDecision NeedsRefine(string status)
+        {
+            return new AgentVerificationDecision(IsConcluded: false, Status: status);
+        }
+    }
 
     private sealed class WorkspacePatchRequestDocument
     {
         public WorkspacePatchChangeDocument[]? Changes { get; init; }
+    }
+
+    private sealed class AgentLoopCheckpointPayloadDocument
+    {
+        public string? Kind { get; init; }
+
+        public int? Version { get; init; }
+
+        public int? NextIteration { get; init; }
+
+        public int? MaxSteps { get; init; }
+
+        public double? MaxTimeSeconds { get; init; }
+
+        public decimal? MaxCost { get; init; }
+
+        public decimal? AccumulatedCost { get; init; }
+
+        public double? ElapsedSeconds { get; init; }
+
+        public string? PreviousVerificationOutput { get; init; }
+
+        public string? PreviousRefinementOutput { get; init; }
     }
 
     private sealed class WorkspacePatchChangeDocument
@@ -5127,5 +7471,8 @@ internal static class Program
         string? PatchRequestFilePath = null,
         bool PatchDryRun = false,
         bool RunAgent = false,
-        string? AgentObjective = null);
+        string? AgentObjective = null,
+        int? AgentMaxSteps = null,
+        TimeSpan? AgentMaxTime = null,
+        decimal? AgentMaxCost = null);
 }

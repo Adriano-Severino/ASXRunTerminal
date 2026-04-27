@@ -39,7 +39,12 @@ Documentar como o ASXRunTerminal organiza extensoes (tools, MCP e skills) e como
 2. `skill` injeta contexto no prompt final por `BuildSkillPrompt(...)`, com bloco `[SKILL: <nome>]` + `instruction` e bloco `[TAREFA]` com prompt do usuario.
 3. Execucao usa `fallbackPromptExecutor` com retries/circuit breaker e fallback de modelo (selecionado -> default -> modelos locais disponiveis).
 4. Cada etapa gera `ExecutionSessionCheckpoint` persistido em `~/.asxrun/execution-checkpoints`.
-5. `resume` encontra checkpoint interrompido mais recente (ou `session-id` explicito) e reexecuta `ask` ou `skill`.
+5. `resume` encontra checkpoint interrompido mais recente (ou `session-id` explicito), reexecuta `ask/skill` e, para `agent`, retoma o loop autonomo a partir do ultimo checkpoint incremental de iteracao.
+
+## Fluxo 3.1: Contrato de Mudanca no Modo `agent`
+1. Na fase `execute`, o prompt exige saida estruturada para mudancas de codigo: `CODE_CHANGE_STATUS`, `CHANGE_FILE`, bloco `diff` e `TECHNICAL_JUSTIFICATION`.
+2. O runtime parseia as evidencias da resposta (`diff` e justificativa por arquivo) e gera resumo de conformidade para a fase `verify`.
+3. Mesmo com `VERIFICATION_STATUS=done`, se faltar diff/justificativa por mudanca declarada, o loop marca `refine` automaticamente para corrigir rastreabilidade.
 
 ## Fluxo 4: Contexto de Workspace (`context` e operacoes de arquivo)
 1. `WorkspaceRootDetector` resolve a raiz por precedencia: monorepo (`pnpm-workspace.yaml`, `nx.json`, `workspaces` no `package.json`) -> solution/workspace (`.sln`, `.slnx`, `.code-workspace`) -> git root (`.git`) -> diretorio atual.

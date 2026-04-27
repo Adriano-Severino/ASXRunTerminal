@@ -66,6 +66,9 @@ public sealed class ProgramMainTests
         Assert.Contains("asxrun skills reload", result.StdOut);
         Assert.Contains("asxrun skill <nome> [--model <modelo>] \"prompt\"", result.StdOut);
         Assert.Contains("--model <nome>", result.StdOut);
+        Assert.Contains("--max-steps <n>", result.StdOut);
+        Assert.Contains("--max-time <v>", result.StdOut);
+        Assert.Contains("--max-cost <v>", result.StdOut);
         Assert.Contains("asxrun ask [--model <modelo>] \"prompt\"", result.StdOut);
         Assert.Contains("padrao: qwen3.5:4b", result.StdOut);
         Assert.Contains("ASXRUN_DEFAULT_MODEL=<nome>", result.StdOut);
@@ -453,11 +456,420 @@ public sealed class ProgramMainTests
         Assert.Contains("[INFO] Iniciando modo agente autonomo por objetivo.", result.StdOut);
         Assert.Contains("Modelo: <padrao> | Prompt: [MODO: AGENTE AUTONOMO]", result.StdOut);
         Assert.Contains("[OBJETIVO]", result.StdOut);
+        Assert.Contains("[CONTEXTO DE ENGENHARIA DO PROJETO]", result.StdOut);
+        Assert.Contains("codigo (", result.StdOut);
+        Assert.Contains("testes (", result.StdOut);
+        Assert.Contains("docs (", result.StdOut);
+        Assert.Contains("historico git recente:", result.StdOut);
         Assert.Contains("[PLANO DE EXECUCAO POR ETAPAS]", result.StdOut);
         Assert.Contains("1. [Mapear contexto e restricoes]", result.StdOut);
         Assert.Contains("Acao: Planejar migracao de dados.", result.StdOut);
         Assert.Contains("planejar migracao de dados", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_InjectsEngineeringContextIntoFirstPlanPrompt()
+    {
+        var capturedPrompts = new List<string>();
+
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+                var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                    ? "VERIFICATION_STATUS=done\nValidacao aprovada."
+                    : "ok";
+                return StreamSingleChunk(response);
+            },
+            "agent",
+            "revisar",
+            "arquitetura");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        var firstPlanPrompt = Assert.Single(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Iteracao: 1", StringComparison.Ordinal)
+                && prompt.Contains("Fase atual: plan", StringComparison.Ordinal));
+        Assert.Contains("[CONTEXTO DE ENGENHARIA DO PROJETO]", firstPlanPrompt);
+        Assert.Contains("codigo (", firstPlanPrompt);
+        Assert.Contains("testes (", firstPlanPrompt);
+        Assert.Contains("docs (", firstPlanPrompt);
+        Assert.Contains("historico git recente:", firstPlanPrompt);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_ExecutePhasePrompt_RequiresDiffAndTechnicalJustificationPerChange()
+    {
+        var capturedPrompts = new List<string>();
+
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+                var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                    ? "VERIFICATION_STATUS=done\nValidacao aprovada."
+                    : "ok";
+                return StreamSingleChunk(response);
+            },
+            "agent",
+            "implementar",
+            "ajuste",
+            "em",
+            "api");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        var executePrompt = Assert.Single(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Iteracao: 1", StringComparison.Ordinal)
+                && prompt.Contains("Fase atual: execute", StringComparison.Ordinal));
+        Assert.Contains("CODE_CHANGE_STATUS=<changed|no-change>", executePrompt);
+        Assert.Contains("CHANGE_FILE=<caminho-relativo>", executePrompt);
+        Assert.Contains("```diff", executePrompt);
+        Assert.Contains(
+            "TECHNICAL_JUSTIFICATION=<justificativa tecnica curta da mudanca>",
+            executePrompt);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_AfterChangedBlock_RunsBuildTestLintBeforeVerify()
+    {
+        var capturedPrompts = new List<string>();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            validationScripts.Add(request.Arguments["script"]);
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5));
+        });
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Ajusta fluxo do agente.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "implementar",
+            "validacao",
+            "automatica");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(3, validationScripts.Count);
+        Assert.Contains("dotnet build", validationScripts[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("dotnet test", validationScripts[1], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("dotnet format", validationScripts[2], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Validacao automatica 'build' passou", result.StdOut);
+        Assert.Contains("Validacao automatica 'test' passou", result.StdOut);
+        Assert.Contains("Validacao automatica 'lint' passou", result.StdOut);
+
+        var verifyPrompt = Assert.Single(
+            capturedPrompts,
+            static prompt => prompt.Contains("Fase atual: verify", StringComparison.Ordinal));
+        Assert.Contains("[VALIDACAO AUTOMATICA POS-MUDANCA]", verifyPrompt);
+        Assert.Contains("Status geral: passed.", verifyPrompt);
+        Assert.Contains("- build: passed", verifyPrompt);
+        Assert.Contains("- test: passed", verifyPrompt);
+        Assert.Contains("- lint: passed", verifyPrompt);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenAutomaticValidationFails_ForcesRefine()
+    {
+        var capturedPrompts = new List<string>();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            var script = request.Arguments["script"];
+            validationScripts.Add(script);
+
+            if (script.Contains("dotnet test", StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolExecutionResult.Failure(
+                    error: "teste quebrado",
+                    exitCode: 1,
+                    duration: TimeSpan.FromMilliseconds(7),
+                    stdOut: "falha em AgentTests");
+            }
+
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5));
+        });
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 1", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Ajusta fluxo do agente.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 2", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=no-change
+                        Ajuste replanejado sem novo bloco de mudancas.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "--max-steps",
+            "3",
+            "corrigir",
+            "falha",
+            "de",
+            "teste");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(3, validationScripts.Count);
+        Assert.Contains(
+            "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.",
+            result.StdOut);
+        Assert.Contains(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Fase atual: refine", StringComparison.Ordinal)
+                && prompt.Contains("Iteracao: 1", StringComparison.Ordinal));
+
+        var firstVerifyPrompt = Assert.Single(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                && prompt.Contains("Iteracao: 1", StringComparison.Ordinal));
+        Assert.Contains("Status geral: failed.", firstVerifyPrompt);
+        Assert.Contains("- test: failed", firstVerifyPrompt);
+        Assert.Contains("stdout: falha em AgentTests", firstVerifyPrompt);
+        Assert.Contains("stderr: teste quebrado", firstVerifyPrompt);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenValidationFails_AutoCorrectsAndRevalidatesBeforeVerify()
+    {
+        var capturedPrompts = new List<string>();
+        var validationScripts = new List<string>();
+        var testRunCount = 0;
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            var script = request.Arguments["script"];
+            validationScripts.Add(script);
+
+            if (script.Contains("dotnet test", StringComparison.OrdinalIgnoreCase))
+            {
+                testRunCount++;
+                if (testRunCount == 1)
+                {
+                    return ToolExecutionResult.Failure(
+                        error: "teste quebrado",
+                        exitCode: 1,
+                        duration: TimeSpan.FromMilliseconds(9),
+                        stdOut: "falha em AgentTests");
+                }
+            }
+
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(4));
+        });
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/core/AgentValidation.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Adiciona validacao inicial.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: auto-correct", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal.Tests/AgentValidationCommandCatalogTests.cs
+                        CHANGE_KIND=test
+                        ```diff
+                        @@ -1 +1 @@
+                        -broken
+                        +fixed
+                        ```
+                        TECHNICAL_JUSTIFICATION=Corrige o teste que falhou na validacao automatica.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "corrigir",
+            "teste",
+            "falhando");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Equal(6, validationScripts.Count);
+        Assert.Equal(2, testRunCount);
+        Assert.Contains(
+            "Auto-correcao de validacao: tentativa 1/2 apos falha em build/test/lint.",
+            result.StdOut);
+        Assert.Contains(
+            "Auto-correcao de validacao: validacao passou apos tentativa 1/2.",
+            result.StdOut);
+        Assert.DoesNotContain("Forcando refine", result.StdOut);
+
+        var autoCorrectionPrompt = Assert.Single(
+            capturedPrompts,
+            static prompt => prompt.Contains("Fase atual: auto-correct", StringComparison.Ordinal));
+        Assert.Contains("Tentativa: 1/2", autoCorrectionPrompt);
+        Assert.Contains("falha em AgentTests", autoCorrectionPrompt);
+
+        var verifyPrompt = Assert.Single(
+            capturedPrompts,
+            static prompt => prompt.Contains("Fase atual: verify", StringComparison.Ordinal));
+        Assert.Contains("[AUTO-CORRECAO POS-VALIDACAO]", verifyPrompt);
+        Assert.Contains("Status geral: passed.", verifyPrompt);
+        Assert.Contains("- test: passed", verifyPrompt);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenAutoCorrectionKeepsFailing_StopsAtAttemptLimit()
+    {
+        var capturedPrompts = new List<string>();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            var script = request.Arguments["script"];
+            validationScripts.Add(script);
+
+            if (script.Contains("dotnet test", StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolExecutionResult.Failure(
+                    error: "teste ainda quebrado",
+                    exitCode: 1,
+                    duration: TimeSpan.FromMilliseconds(8),
+                    stdOut: "falha persistente em AgentTests");
+            }
+
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(4));
+        });
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    || prompt.Contains("Fase atual: auto-correct", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Tenta corrigir a falha de teste.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "--max-steps",
+            "1",
+            "corrigir",
+            "teste",
+            "persistente");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Equal(9, validationScripts.Count);
+        Assert.Equal(
+            2,
+            capturedPrompts.Count(
+                static prompt => prompt.Contains("Fase atual: auto-correct", StringComparison.Ordinal)));
+        Assert.Contains(
+            "Auto-correcao de validacao: limite de 2 tentativa(s) atingido; mantendo falha para verify/refine.",
+            result.StdOut);
+        Assert.Contains(
+            "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.",
+            result.StdOut);
+        Assert.Contains(
+            "[ERROR] Nao foi possivel concluir a execucao. O modo agente nao conseguiu concluir o objetivo com seguranca.",
+            result.StdErr);
     }
 
     [Fact]
@@ -552,6 +964,227 @@ public sealed class ProgramMainTests
         Assert.Contains("[ERROR] Nao foi possivel executar o comando. O objetivo informado para o comando 'agent' esta vazio.", result.StdErr);
         Assert.Contains("[ERROR] Sugestao: Exemplo: asxrun agent \"seu objetivo\".", result.StdErr);
         Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenVerifyRequestsRefine_ExecutesRefineAndConcludesNextIteration()
+    {
+        var capturedPrompts = new List<string>();
+
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 1", StringComparison.Ordinal)
+                    ? "VERIFICATION_STATUS=refine\nLacuna: faltam validacoes."
+                    : prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                        ? "VERIFICATION_STATUS=done\nValidacao aprovada."
+                        : "ok";
+                return StreamSingleChunk(response);
+            },
+            "agent",
+            "corrigir",
+            "pipeline");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains(
+            capturedPrompts,
+            static prompt => prompt.Contains("Fase atual: refine", StringComparison.Ordinal));
+        Assert.Contains(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Iteracao: 2", StringComparison.Ordinal)
+                && prompt.Contains("Fase atual: plan", StringComparison.Ordinal));
+        Assert.Contains(
+            "Verificacao marcou status 'refine'. Iniciando fase refine.",
+            result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenVerifyReturnsDoneButExecuteEvidenceIsIncomplete_ForcesRefine()
+    {
+        var capturedPrompts = new List<string>();
+        var toolRuntime = new StubToolRuntime(static (_, _) =>
+            ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(1)));
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 1", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=src/Program.cs
+                        CHANGE_KIND=edit
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 2", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=src/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Atualiza validacao de parametros.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "--max-steps",
+            "3",
+            "corrigir",
+            "validador");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains(
+            "Verificacao marcou status 'done', mas as evidencias de diff/justificativa por mudanca estao incompletas. Forcando refine.",
+            result.StdOut);
+        Assert.Contains(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Fase atual: refine", StringComparison.Ordinal)
+                && prompt.Contains("Iteracao: 1", StringComparison.Ordinal));
+        Assert.Contains(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Fase atual: plan", StringComparison.Ordinal)
+                && prompt.Contains("Iteracao: 2", StringComparison.Ordinal));
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenVerifyNeverConcludes_ReturnsRuntimeErrorAfterInternalLimit()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, _, _) =>
+            {
+                var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                    ? "VERIFICATION_STATUS=refine\nAinda pendente."
+                    : "ok";
+                return StreamSingleChunk(response);
+            },
+            "agent",
+            "mapear",
+            "riscos");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Contains(
+            "Loop autonomo interrompido apos 8 iteracao(oes) sem sinal explicito de conclusao na fase verify.",
+            result.StdErr);
+        Assert.Contains(
+            "[ERROR] Nao foi possivel concluir a execucao. O modo agente nao conseguiu concluir o objetivo com seguranca.",
+            result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithConfiguredMaxStepsLimit_StopsAtConfiguredLimit()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (prompt, _, _) =>
+            {
+                var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                    ? "VERIFICATION_STATUS=refine\nAinda pendente."
+                    : "ok";
+                return StreamSingleChunk(response);
+            },
+            "agent",
+            "--max-steps",
+            "2",
+            "mapear",
+            "riscos");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Contains(
+            "Loop autonomo interrompido apos 2 iteracao(oes) sem sinal explicito de conclusao na fase verify.",
+            result.StdErr);
+        Assert.Contains(
+            "[ERROR] Nao foi possivel concluir a execucao. O modo agente nao conseguiu concluir o objetivo com seguranca.",
+            result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithInvalidMaxStepsValue_ReturnsInvalidArguments()
+    {
+        var result = ExecuteMain(
+            "agent",
+            "--max-steps",
+            "0",
+            "planejar",
+            "migracao");
+
+        Assert.Equal((int)CliExitCode.InvalidArguments, result.ExitCode);
+        Assert.Contains(
+            "[ERROR] Nao foi possivel executar o comando. A opcao '--max-steps' exige um numero inteiro positivo.",
+            result.StdErr);
+        Assert.Contains(
+            "[ERROR] Sugestao: Exemplo: asxrun agent --max-steps 6 \"seu objetivo\".",
+            result.StdErr);
+        Assert.Equal(string.Empty, result.StdOut);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenMaxTimeBudgetIsExceeded_ReturnsRuntimeError()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (_, _, cancellationToken) => StreamSingleChunkAfterDelay(
+                "ok",
+                delayMilliseconds: 120,
+                cancellationToken),
+            "agent",
+            "--max-time",
+            "0.05",
+            "planejar",
+            "migracao");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Contains(
+            "Loop autonomo interrompido por limite de tempo da sessao",
+            result.StdErr);
+        Assert.Contains(
+            "[ERROR] Nao foi possivel concluir a execucao. O modo agente atingiu o limite de tempo da sessao.",
+            result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenMaxCostBudgetIsExceeded_ReturnsRuntimeError()
+    {
+        var result = ExecuteMainWithModelAwareStreamingExecutor(
+            static (_, _, _) => StreamSingleChunk(new string('x', 800)),
+            "agent",
+            "--max-cost",
+            "120",
+            "planejar",
+            "migracao");
+
+        Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+        Assert.Contains(
+            "Loop autonomo interrompido por limite de custo da sessao",
+            result.StdErr);
+        Assert.Contains(
+            "[ERROR] Nao foi possivel concluir a execucao. O modo agente atingiu o limite de custo da sessao.",
+            result.StdErr);
     }
 
     [Fact]
@@ -2258,6 +2891,76 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_ResumeCommand_WhenAgentLoopCheckpointExists_ResumesFromSavedIteration()
+    {
+        var capturedPrompts = new List<string>();
+        var loopCheckpointDetail = JsonSerializer.Serialize(new
+        {
+            Kind = "agent-loop-resume-v1",
+            Version = 1,
+            NextIteration = 3,
+            MaxSteps = 6,
+            MaxTimeSeconds = 90d,
+            MaxCost = 25000m,
+            AccumulatedCost = 1450m,
+            ElapsedSeconds = 12.5d,
+            PreviousVerificationOutput = "falta validar rollback",
+            PreviousRefinementOutput = "aplicar validacao em ambiente de staging"
+        });
+        var checkpoints = new[]
+        {
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 3, 0, TimeSpan.Zero),
+                SessionId: "sessao-agent-com-loop",
+                Command: "agent",
+                Stage: "error",
+                Status: ExecutionCheckpointStatus.Failed,
+                Prompt: "otimizar pipeline de deploy",
+                Model: "qwen2.5-coder:7b",
+                SkillName: null,
+                Detail: "falha"),
+            new ExecutionSessionCheckpoint(
+                TimestampUtc: new DateTimeOffset(2026, 4, 20, 12, 2, 0, TimeSpan.Zero),
+                SessionId: "sessao-agent-com-loop",
+                Command: "agent",
+                Stage: "agent-loop",
+                Status: ExecutionCheckpointStatus.InProgress,
+                Prompt: "otimizar pipeline de deploy",
+                Model: "qwen2.5-coder:7b",
+                SkillName: null,
+                Detail: loopCheckpointDetail)
+        };
+
+        var result = ExecuteMainWithCheckpoints(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+                var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                    ? "VERIFICATION_STATUS=done\nIteracao concluida."
+                    : "ok";
+                return StreamSingleChunk(response);
+            },
+            () => checkpoints,
+            static _ => { },
+            "resume");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains(
+            "Checkpoint incremental do agente identificado: iteracao 3/6.",
+            result.StdOut);
+        Assert.Contains(
+            "Retomando loop autonomo a partir da iteracao 3/6.",
+            result.StdOut);
+        Assert.DoesNotContain(
+            capturedPrompts,
+            static prompt => prompt.Contains("Iteracao: 1", StringComparison.Ordinal));
+        Assert.All(
+            capturedPrompts,
+            static prompt => Assert.Contains("Iteracao: 3", prompt));
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
     public void Main_ResumeCommand_WhenNoInterruptedSessionExists_ReturnsRuntimeError()
     {
         var checkpoints = new[]
@@ -2334,6 +3037,35 @@ public sealed class ProgramMainTests
         params string[] args)
     {
         return ExecuteMainWithInputInternal(null, null, null, promptExecutor, null, null, null, null, null, args);
+    }
+
+    private static ExecutionResult ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        IToolRuntime toolRuntime,
+        params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+
+        using var stdOutWriter = new StringWriter();
+        using var stdErrWriter = new StringWriter();
+
+        Console.SetOut(stdOutWriter);
+        Console.SetError(stdErrWriter);
+
+        try
+        {
+            var exitCode = Program.RunForTests(args, promptExecutor, toolRuntime);
+            return new ExecutionResult(
+                ExitCode: exitCode,
+                StdOut: stdOutWriter.ToString(),
+                StdErr: stdErrWriter.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
     }
 
     private static ExecutionResult ExecuteMainWithModelAwareStreamingExecutorAndModels(
@@ -2754,6 +3486,21 @@ public sealed class ProgramMainTests
         await Task.CompletedTask;
     }
 
+    private static async IAsyncEnumerable<string> StreamSingleChunk(string content)
+    {
+        yield return content;
+        await Task.CompletedTask;
+    }
+
+    private static async IAsyncEnumerable<string> StreamSingleChunkAfterDelay(
+        string content,
+        int delayMilliseconds,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await Task.Delay(delayMilliseconds, cancellationToken);
+        yield return content;
+    }
+
     private static async IAsyncEnumerable<string> StreamPromptWithDiffInChunks()
     {
         yield return "```diff\n";
@@ -2805,6 +3552,35 @@ public sealed class ProgramMainTests
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class StubToolRuntime(
+        Func<ToolExecutionRequest, CancellationToken, ToolExecutionResult> execute) : IToolRuntime
+    {
+        public IReadOnlyList<ToolDescriptor> ListTools()
+        {
+            return
+            [
+                new ToolDescriptor(
+                    Name: "shell",
+                    Description: "Stub shell para testes.",
+                    Parameters:
+                    [
+                        new ToolParameter(
+                            Name: "script",
+                            Description: "Script capturado pelo teste.",
+                            IsRequired: true)
+                    ])
+            ];
+        }
+
+        public Task<ToolExecutionResult> ExecuteAsync(
+            ToolExecutionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(execute(request, cancellationToken));
         }
     }
 

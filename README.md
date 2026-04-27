@@ -268,13 +268,35 @@ asxrun agent "Planejar e executar migracao incremental de banco com rollback seg
 ```
 
 O comando decompoe o objetivo automaticamente em um plano de execucao por etapas
-antes de enviar o prompt ao modelo.
+e executa o loop autonomo `plan -> execute -> verify -> refine` ate concluir
+ou atingir o limite interno de seguranca.
+
+Na fase `execute`, quando houver alteracao de codigo, o agente exige rastreabilidade
+por mudanca com:
+
+- `CODE_CHANGE_STATUS=<changed|no-change>`
+- `CHANGE_FILE=<caminho-relativo>`
+- bloco `diff` unificado por arquivo
+- `TECHNICAL_JUSTIFICATION=<justificativa tecnica>`
+
+Se o `verify` receber resposta `done` sem diff e justificativa por mudanca declarada,
+o loop forca `refine` automaticamente.
 
 Opcionalmente, use modelo explicito:
 
 ```bash
 asxrun agent --model qwen2.5-coder:7b "Mapear riscos e propor plano de execucao para modernizacao de API."
 ```
+
+Controle de orcamento por sessao (`max_steps`, `max_time`, `max_cost`):
+
+```bash
+asxrun agent --max-steps 6 --max-time 300 --max-cost 20000 "Planejar e executar migracao incremental."
+```
+
+- `--max-steps`: limite de iteracoes do loop autonomo.
+- `--max-time`: limite de tempo total da sessao (`segundos` ou formato `hh:mm:ss`).
+- `--max-cost`: limite de custo estimado em caracteres acumulados (`prompt + resposta`).
 
 ### Modo interativo
 
@@ -361,6 +383,9 @@ Retomar a sessao interrompida mais recente de `ask/agent/skill`:
 ```bash
 asxrun resume
 ```
+
+Para `agent`, a retomada usa o ultimo checkpoint incremental do loop autonomo
+e continua a partir da iteracao salva (mantendo `max_steps`, `max_time` e `max_cost` da sessao).
 
 Retomar uma sessao especifica:
 
