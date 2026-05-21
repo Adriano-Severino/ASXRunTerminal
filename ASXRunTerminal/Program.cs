@@ -19,24 +19,34 @@ internal static class Program
     private const string AgentMaxStepsFlag = "--max-steps";
     private const string AgentMaxTimeFlag = "--max-time";
     private const string AgentMaxCostFlag = "--max-cost";
+    private const string AgentApproveSensitiveFlag = AgentGovernedToolRuntime.SensitiveApprovalFlagName;
+    private const string AgentBenchmarkMinimumSuccessRateFlag = "--min-success-rate";
     private const string AgentMaxStepsAliasFlag = "--max_steps";
     private const string AgentMaxTimeAliasFlag = "--max_time";
     private const string AgentMaxCostAliasFlag = "--max_cost";
+    private const string AgentApproveSensitiveAliasFlag = "--approve_sensitive";
+    private const string AgentBenchmarkMinimumSuccessRateAliasFlag = "--min_success_rate";
     private const string InteractiveChatPromptPrefix = "> ";
     private const int AgentAutonomousMaxIterations = 8;
     private const int AgentAutoCorrectionMaxAttempts = 2;
     private const string AgentVerificationStatusDone = "done";
     private const string AgentVerificationStatusRefine = "refine";
+    private const string AgentSelfReviewStatusApproved = "approved";
+    private const string AgentSelfReviewStatusRefine = "refine";
     private const string AgentCodeChangeStatusChanged = "changed";
     private const string AgentCodeChangeStatusNoChange = "no-change";
     private const string AgentCodeChangeStatusUnknown = "unknown";
+    private const string AgentGovernanceValidationName = "governance";
+    private const string AgentCoverageValidationName = "coverage";
     private const string AgentLoopCheckpointStage = "agent-loop";
     private const string AgentLoopCheckpointKind = "agent-loop-resume-v1";
     private const int AgentPromptContextExcerptMaxCharacters = 2500;
     private const int AgentValidationOutputExcerptMaxCharacters = 1200;
+    private const int AgentDeliverySummaryItemMaxCharacters = 500;
     private const int AgentProjectContextSampleLimit = 8;
     private const int AgentProjectGitHistoryCommitLimit = 5;
     private const int AgentProjectGitSubjectMaxCharacters = 120;
+    private const int AgentBenchmarkSessionSampleLimit = 5;
     private const int ResilienceRetryAttempts = 3;
     private const int ResilienceCircuitFailureThreshold = 3;
     private static readonly TimeSpan ResilienceRetryDelay = TimeSpan.FromMilliseconds(150);
@@ -116,6 +126,7 @@ internal static class Program
         "--max-steps",
         "--max-time",
         "--max-cost",
+        "--approve-sensitive",
         "--dry-run",
         "--help",
         "--version",
@@ -147,6 +158,10 @@ internal static class Program
             RegisterConsoleCancelHandler(cancellationTokenSource, onCancellationRequested);
     private static readonly Func<WorkspacePatchAuditEntry, string> DefaultWorkspacePatchAuditAppender =
         static entry => WorkspacePatchAuditFile.Append(entry);
+    private static readonly Func<AgentAuditEntry, string> DefaultAgentAuditAppender =
+        static entry => AgentAuditFile.Append(entry);
+    private static readonly Func<IReadOnlyList<AgentAuditEntry>> DefaultAgentAuditLoader =
+        static () => AgentAuditFile.Load();
     private static readonly Action<ExecutionSessionCheckpoint> DefaultExecutionCheckpointAppender =
         static checkpoint => ExecutionCheckpointFile.Append(checkpoint);
     private static readonly Func<IReadOnlyList<ExecutionSessionCheckpoint>> DefaultExecutionCheckpointLoader =
@@ -156,12 +171,17 @@ internal static class Program
     private static readonly Action NoOpUserConfigInitializer = static () => { };
     private static readonly Func<WorkspacePatchAuditEntry, string> NoOpWorkspacePatchAuditAppender =
         static _ => string.Empty;
+    private static readonly Func<AgentAuditEntry, string> NoOpAgentAuditAppender =
+        static _ => string.Empty;
+    private static readonly Func<IReadOnlyList<AgentAuditEntry>> NoOpAgentAuditLoader =
+        static () => Array.Empty<AgentAuditEntry>();
     private static readonly Action<ExecutionSessionCheckpoint> NoOpExecutionCheckpointAppender =
         static _ => { };
     private static readonly Func<IReadOnlyList<ExecutionSessionCheckpoint>> NoOpExecutionCheckpointLoader =
         static () => Array.Empty<ExecutionSessionCheckpoint>();
     private static readonly string CurrentExecutionSessionId = Guid.NewGuid().ToString("N");
     private static long _workspacePatchAuditSequence;
+    private static long _agentAuditSequence;
 
     public static int Main(string[] args)
     {
@@ -174,6 +194,7 @@ internal static class Program
             DefaultUserConfigInitializer,
             applyConfiguredTheme: true,
             workspacePatchAuditAppender: DefaultWorkspacePatchAuditAppender,
+            agentAuditAppender: DefaultAgentAuditAppender,
             executionCheckpointAppender: DefaultExecutionCheckpointAppender,
             executionCheckpointLoader: DefaultExecutionCheckpointLoader);
     }
@@ -255,6 +276,43 @@ internal static class Program
             DefaultCancelSignalRegistration,
             NoOpUserConfigInitializer,
             toolRuntimeOverride: toolRuntime);
+    }
+
+    internal static int RunForTests(
+        string[] args,
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        IToolRuntime toolRuntime,
+        Func<AgentAuditEntry, string> agentAuditAppender)
+    {
+        ArgumentNullException.ThrowIfNull(promptExecutor);
+        ArgumentNullException.ThrowIfNull(toolRuntime);
+        ArgumentNullException.ThrowIfNull(agentAuditAppender);
+
+        return Run(
+            args,
+            promptExecutor,
+            DefaultHealthcheckExecutor,
+            DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer,
+            agentAuditAppender: agentAuditAppender,
+            toolRuntimeOverride: toolRuntime);
+    }
+
+    internal static int RunForTests(
+        string[] args,
+        Func<IReadOnlyList<AgentAuditEntry>> agentAuditLoader)
+    {
+        ArgumentNullException.ThrowIfNull(agentAuditLoader);
+
+        return Run(
+            args,
+            DefaultPromptExecutor,
+            DefaultHealthcheckExecutor,
+            DefaultModelsExecutor,
+            DefaultCancelSignalRegistration,
+            NoOpUserConfigInitializer,
+            agentAuditLoader: agentAuditLoader);
     }
 
     internal static int RunForTests(
@@ -486,6 +544,8 @@ internal static class Program
         Action<IReadOnlyList<McpServerDefinition>>? mcpServersSaver = null,
         Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null,
         Func<WorkspacePatchAuditEntry, string>? workspacePatchAuditAppender = null,
+        Func<AgentAuditEntry, string>? agentAuditAppender = null,
+        Func<IReadOnlyList<AgentAuditEntry>>? agentAuditLoader = null,
         Action<ExecutionSessionCheckpoint>? executionCheckpointAppender = null,
         Func<IReadOnlyList<ExecutionSessionCheckpoint>>? executionCheckpointLoader = null,
         IToolRuntime? toolRuntimeOverride = null)
@@ -504,6 +564,8 @@ internal static class Program
         mcpServersSaver ??= DefaultMcpServersSaver;
         mcpServerTester ??= DefaultMcpServerTester;
         workspacePatchAuditAppender ??= NoOpWorkspacePatchAuditAppender;
+        agentAuditAppender ??= NoOpAgentAuditAppender;
+        agentAuditLoader ??= applyConfiguredTheme ? DefaultAgentAuditLoader : NoOpAgentAuditLoader;
         executionCheckpointAppender ??= NoOpExecutionCheckpointAppender;
         executionCheckpointLoader ??= NoOpExecutionCheckpointLoader;
         var promptResilience = new ResilienceState("Ollama/prompt");
@@ -559,7 +621,15 @@ internal static class Program
                     cancelSignalRegistration,
                     executionCheckpointAppender,
                     executionCheckpointLoader,
-                    toolRuntime);
+                    toolRuntime,
+                    agentAuditAppender);
+            }
+
+            if (parseResult.RunAgentBenchmark)
+            {
+                return ExecuteAgentSuccessBenchmark(
+                    agentAuditLoader,
+                    parseResult.AgentBenchmarkMinimumSuccessRate);
             }
 
             if (parseResult.RunAgent && parseResult.AgentObjective is not null)
@@ -570,10 +640,12 @@ internal static class Program
                     parseResult.AgentMaxSteps,
                     parseResult.AgentMaxTime,
                     parseResult.AgentMaxCost,
+                    parseResult.AgentSensitiveOperationsApproved,
                     fallbackPromptExecutor,
                     cancelSignalRegistration,
                     executionCheckpointAppender,
-                    toolRuntime);
+                    toolRuntime,
+                    agentAuditAppender);
             }
 
             if (parseResult.AskPrompt is not null)
@@ -1876,12 +1948,19 @@ internal static class Program
     private static ParseResult ParseAgentArguments(string[] args)
     {
         var commandArguments = args.Skip(1).ToArray();
+        if (commandArguments.Length > 0
+            && string.Equals(commandArguments[0], "benchmark", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseAgentBenchmarkArguments(commandArguments[1..]);
+        }
+
         var optionError = TryExtractAgentOptions(
             commandArguments,
             out var selectedModel,
             out var maxSteps,
             out var maxTime,
             out var maxCost,
+            out var hasExplicitSensitiveOperationApproval,
             out var remainingArguments);
 
         if (optionError is CliFriendlyError error)
@@ -1941,7 +2020,89 @@ internal static class Program
             AgentObjective: objective,
             AgentMaxSteps: maxSteps,
             AgentMaxTime: maxTime,
-            AgentMaxCost: maxCost);
+            AgentMaxCost: maxCost,
+            AgentSensitiveOperationsApproved: hasExplicitSensitiveOperationApproval);
+    }
+
+    private static ParseResult ParseAgentBenchmarkArguments(string[] args)
+    {
+        decimal? minimumSuccessRate = null;
+
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (TryReadOptionValueWithAlias(
+                args,
+                ref index,
+                AgentBenchmarkMinimumSuccessRateFlag,
+                AgentBenchmarkMinimumSuccessRateAliasFlag,
+                out var minimumSuccessRateValue,
+                out var minimumSuccessRateError))
+            {
+                if (minimumSuccessRateError is CliFriendlyError error)
+                {
+                    return BuildAgentBenchmarkParseResult(error);
+                }
+
+                if (minimumSuccessRate is not null)
+                {
+                    return BuildAgentBenchmarkParseResult(
+                        CliFriendlyError.InvalidArguments(
+                            detail:
+                                $"A opcao '{AgentBenchmarkMinimumSuccessRateFlag}' foi informada mais de uma vez no comando 'agent benchmark'.",
+                            suggestion:
+                                $"Exemplo: {CliName} agent benchmark {AgentBenchmarkMinimumSuccessRateFlag} 70."));
+                }
+
+                if (!decimal.TryParse(
+                    minimumSuccessRateValue,
+                    NumberStyles.Float,
+                    CultureInfo.InvariantCulture,
+                    out var parsedMinimumSuccessRate)
+                    || parsedMinimumSuccessRate < 0m
+                    || parsedMinimumSuccessRate > 100m)
+                {
+                    return BuildAgentBenchmarkParseResult(
+                        CliFriendlyError.InvalidArguments(
+                            detail:
+                                $"A opcao '{AgentBenchmarkMinimumSuccessRateFlag}' exige um percentual entre 0 e 100.",
+                            suggestion:
+                                $"Exemplo: {CliName} agent benchmark {AgentBenchmarkMinimumSuccessRateFlag} 70."));
+                }
+
+                minimumSuccessRate = AgentSuccessBenchmarkReport.NormalizePercent(
+                    parsedMinimumSuccessRate);
+                continue;
+            }
+
+            return BuildAgentBenchmarkParseResult(
+                CliFriendlyError.InvalidArguments(
+                    detail:
+                        $"O comando 'agent benchmark' nao reconhece o argumento '{argument}'.",
+                    suggestion:
+                        $"Exemplo: {CliName} agent benchmark {AgentBenchmarkMinimumSuccessRateFlag} 70."));
+        }
+
+        return BuildAgentBenchmarkParseResult(
+            error: null,
+            minimumSuccessRate: minimumSuccessRate);
+    }
+
+    private static ParseResult BuildAgentBenchmarkParseResult(
+        CliFriendlyError? error,
+        decimal? minimumSuccessRate = null)
+    {
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: null,
+            Error: error,
+            RunAgentBenchmark: error is null,
+            AgentBenchmarkMinimumSuccessRate: minimumSuccessRate);
     }
 
     private static ParseResult ParseChatArguments(string[] args)
@@ -2214,6 +2375,7 @@ internal static class Program
         out int? maxSteps,
         out TimeSpan? maxTime,
         out decimal? maxCost,
+        out bool hasExplicitSensitiveOperationApproval,
         out List<string> remainingArguments)
     {
         ArgumentNullException.ThrowIfNull(arguments);
@@ -2222,6 +2384,7 @@ internal static class Program
         maxSteps = null;
         maxTime = null;
         maxCost = null;
+        hasExplicitSensitiveOperationApproval = false;
         remainingArguments = [];
 
         for (var index = 0; index < arguments.Length; index++)
@@ -2386,6 +2549,19 @@ internal static class Program
                 continue;
             }
 
+            if (IsAgentSensitiveApprovalFlag(argument))
+            {
+                if (hasExplicitSensitiveOperationApproval)
+                {
+                    return CliFriendlyError.InvalidArguments(
+                        detail: $"A opcao '{AgentApproveSensitiveFlag}' foi informada mais de uma vez no comando 'agent'.",
+                        suggestion: $"Exemplo: {CliName} agent {AgentApproveSensitiveFlag} \"seu objetivo\".");
+                }
+
+                hasExplicitSensitiveOperationApproval = true;
+                continue;
+            }
+
             remainingArguments.Add(argument);
         }
 
@@ -2406,6 +2582,12 @@ internal static class Program
         }
 
         return TryReadOptionValue(args, ref index, aliasOptionName, out optionValue, out error);
+    }
+
+    private static bool IsAgentSensitiveApprovalFlag(string argument)
+    {
+        return string.Equals(argument, AgentApproveSensitiveFlag, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(argument, AgentApproveSensitiveAliasFlag, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryParsePositiveDuration(string rawValue, out TimeSpan parsedDuration)
@@ -2522,7 +2704,8 @@ internal static class Program
         Console.WriteLine("Uso:");
         Console.WriteLine($"  {CliName} [opcao]");
         Console.WriteLine($"  {CliName} ask [--model <modelo>] \"prompt\"");
-        Console.WriteLine($"  {CliName} agent [--model <modelo>] \"objetivo\"");
+        Console.WriteLine($"  {CliName} agent [--model <modelo>] [{AgentApproveSensitiveFlag}] \"objetivo\"");
+        Console.WriteLine($"  {CliName} agent benchmark [{AgentBenchmarkMinimumSuccessRateFlag} <percentual>]");
         Console.WriteLine($"  {CliName} chat [--model <modelo>]");
         Console.WriteLine($"  {CliName} doctor");
         Console.WriteLine($"  {CliName} models");
@@ -2550,6 +2733,10 @@ internal static class Program
         Console.WriteLine($"  {AgentMaxStepsFlag} <n>  Limita iteracoes do comando 'agent' por sessao (padrao: {AgentAutonomousMaxIterations}).");
         Console.WriteLine($"  {AgentMaxTimeFlag} <v>   Limita duracao da sessao do 'agent' (segundos ou hh:mm:ss).");
         Console.WriteLine($"  {AgentMaxCostFlag} <v>   Limita custo estimado do 'agent' em caracteres (prompt + resposta).");
+        Console.WriteLine($"  {AgentApproveSensitiveFlag}");
+        Console.WriteLine("                   Aprova explicitamente operacoes destrutivas/sensiveis nesta sessao do 'agent'.");
+        Console.WriteLine($"  {AgentBenchmarkMinimumSuccessRateFlag} <p>");
+        Console.WriteLine("                   Define percentual minimo para 'agent benchmark' retornar sucesso.");
         Console.WriteLine($"  {OllamaModelDefaults.DefaultModelEnvironmentVariable}=<nome>");
         Console.WriteLine("                   Sobrescreve o modelo padrao quando --model nao e informado.");
         Console.WriteLine();
@@ -2557,7 +2744,8 @@ internal static class Program
         Console.WriteLine("  ask \"prompt\"    Executa um prompt unico.");
         Console.WriteLine("  agent \"objetivo\" Inicia o modo agente autonomo orientado por objetivo.");
         Console.WriteLine("                   Executa o loop plan -> execute -> verify -> refine ate concluir.");
-        Console.WriteLine($"                   Opcional: use {AgentMaxStepsFlag}, {AgentMaxTimeFlag} e {AgentMaxCostFlag} para controlar orcamento da sessao.");
+        Console.WriteLine($"                   Opcional: use {AgentMaxStepsFlag}, {AgentMaxTimeFlag}, {AgentMaxCostFlag} e {AgentApproveSensitiveFlag}.");
+        Console.WriteLine("  agent benchmark Mede a taxa de tarefas concluidas sem intervencao humana.");
         Console.WriteLine("  chat             Inicia o modo interativo.");
         Console.WriteLine("                   Comandos no chat: /help, /clear, /models, /tools, /exit.");
         Console.WriteLine("  doctor           Valida a disponibilidade do Ollama.");
@@ -2625,10 +2813,12 @@ internal static class Program
         int? maxSteps,
         TimeSpan? maxTime,
         decimal? maxCost,
+        bool hasExplicitSensitiveOperationApproval,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
         IToolRuntime toolRuntime,
+        Func<AgentAuditEntry, string> agentAuditAppender,
         AgentAutonomousLoopState? resumeLoopState = null,
         string? checkpointSessionId = null)
     {
@@ -2636,6 +2826,7 @@ internal static class Program
         ArgumentNullException.ThrowIfNull(cancelSignalRegistration);
         ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
         ArgumentNullException.ThrowIfNull(toolRuntime);
+        ArgumentNullException.ThrowIfNull(agentAuditAppender);
 
         ConsoleLogger.Info("Iniciando modo agente autonomo por objetivo.");
         var sessionBudget = new AgentSessionBudget(
@@ -2663,6 +2854,24 @@ internal static class Program
             $"testes={projectContext.TestFileCount}, docs={projectContext.DocumentationFileCount}, " +
             $"git={projectContext.GitHistorySummary}.");
 
+        if (!TryLoadAgentAutonomyPolicy(
+            projectContext.WorkspaceRootDirectory,
+            out var autonomyPolicy,
+            out var autonomyPolicyError))
+        {
+            WriteFriendlyError(autonomyPolicyError);
+            return (int)autonomyPolicyError.ExitCode;
+        }
+
+        ConsoleLogger.Info($"Nivel de autonomia do projeto: {autonomyPolicy.LevelName}.");
+        ConsoleLogger.Info(
+            "Aprovacao explicita para operacoes sensiveis/destrutivas no modo agente: " +
+            $"{(hasExplicitSensitiveOperationApproval ? "habilitada" : "nao habilitada")}.");
+        var agentToolRuntime = new AgentGovernedToolRuntime(
+            toolRuntime,
+            hasExplicitSensitiveOperationApproval,
+            () => ShellCommandPermissionPolicyFile.Load(projectContext.WorkspaceRootDirectory));
+
         var executionPlan = AgentObjectivePlanner.Build(objective);
         var checkpointContext = CreatePromptCheckpointContext(
             command: "agent",
@@ -2671,6 +2880,66 @@ internal static class Program
             skillName: null,
             executionCheckpointAppender: executionCheckpointAppender,
             sessionId: checkpointSessionId);
+        var auditContext = new AgentAuditContext(
+            SessionId: checkpointContext.SessionId,
+            Objective: objective,
+            Model: model,
+            WorkspaceRootDirectory: projectContext.WorkspaceRootDirectory,
+            AutonomyLevel: autonomyPolicy.LevelName,
+            HasExplicitSensitiveOperationApproval: hasExplicitSensitiveOperationApproval,
+            AgentAuditAppender: agentAuditAppender);
+        var auditPath = AppendAgentAuditEntry(
+            auditContext,
+            iteration: 0,
+            phase: "session",
+            eventType: "lifecycle",
+            status: resumeLoopState is AgentAutonomousLoopState ? "resumed" : "started",
+            summary: "Sessao do modo agente iniciada.",
+            detail:
+                $"max_steps={sessionBudget.MaxSteps}; " +
+                $"max_time={FormatOptionalBudgetDuration(sessionBudget.MaxTime)}; " +
+                $"max_cost={FormatOptionalBudgetValue(sessionBudget.MaxCost)}; " +
+                $"workspace={projectContext.WorkspaceRootDirectory}; " +
+                $"autonomy={autonomyPolicy.LevelName}; " +
+                $"sensitive_approval={(hasExplicitSensitiveOperationApproval ? "sim" : "nao")}.");
+        if (!string.IsNullOrWhiteSpace(auditPath))
+        {
+            ConsoleLogger.Info($"Trilha de auditoria do agente: {auditPath}");
+        }
+
+        var stableStateStore = new AgentStableStateStore();
+        AgentStableStateSnapshot stableStateSnapshot;
+        try
+        {
+            stableStateSnapshot = stableStateStore.Capture(projectContext.WorkspaceRootDirectory);
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or FileNotFoundException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            var rollbackPreparationError = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel preparar rollback automatico do modo agente. {ex.Message}",
+                suggestion: "Verifique se o workspace esta acessivel e reduza arquivos ignorados/gerados antes de executar novamente.");
+            WriteFriendlyError(rollbackPreparationError);
+            return (int)rollbackPreparationError.ExitCode;
+        }
+
+        ConsoleLogger.Info(
+            $"Estado estavel inicial capturado para rollback automatico: {stableStateSnapshot.FileCount} arquivo(s).");
+        AppendAgentAuditEntry(
+            auditContext,
+            iteration: 0,
+            phase: "stable-state",
+            eventType: "snapshot",
+            status: "captured",
+            summary: "Estado estavel inicial capturado para rollback automatico.",
+            detail:
+                $"files={stableStateSnapshot.FileCount}; " +
+                $"workspace={stableStateSnapshot.WorkspaceRootDirectory}; " +
+                $"created_at_utc={stableStateSnapshot.CreatedAtUtc:O}.");
 
         var loopResult = ExecuteAgentAutonomousLoop(
             executionPlan,
@@ -2679,12 +2948,27 @@ internal static class Program
             promptExecutor,
             cancelSignalRegistration,
             projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
             normalizedResumeLoopState,
             checkpointContext,
-            toolRuntime);
+            agentToolRuntime,
+            auditContext,
+            stableStateStore,
+            stableStateSnapshot);
 
         if (loopResult.WasCancelled)
         {
+            AppendAgentAuditEntry(
+                auditContext,
+                loopResult.IterationCount,
+                phase: "session",
+                eventType: "lifecycle",
+                status: "cancelled",
+                summary: "Sessao do agente cancelada.",
+                detail:
+                    $"elapsed={FormatRequiredBudgetDuration(loopResult.Elapsed)}; " +
+                    $"accumulated_cost={FormatRequiredBudgetValue(loopResult.AccumulatedCost)}.");
             return (int)CliExitCode.Cancelled;
         }
 
@@ -2709,6 +2993,14 @@ internal static class Program
                 notConcludedDetail,
                 checkpointContext,
                 ExecutionCheckpointStatus.Failed);
+            AppendAgentAuditEntry(
+                auditContext,
+                loopResult.IterationCount,
+                phase: "session",
+                eventType: "decision",
+                status: "failed",
+                summary: "Loop autonomo encerrado sem conclusao segura.",
+                detail: notConcludedDetail);
 
             var notConcludedError = loopResult.BudgetLimitKind switch
             {
@@ -2737,6 +3029,67 @@ internal static class Program
         return (int)CliExitCode.Success;
     }
 
+    private static int ExecuteAgentSuccessBenchmark(
+        Func<IReadOnlyList<AgentAuditEntry>> agentAuditLoader,
+        decimal? minimumAutonomousSuccessRatePercent)
+    {
+        ArgumentNullException.ThrowIfNull(agentAuditLoader);
+
+        IReadOnlyList<AgentAuditEntry> auditEntries;
+        try
+        {
+            auditEntries = agentAuditLoader();
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            var error = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel carregar a trilha de auditoria do agente. {ex.Message}",
+                suggestion: "Verifique o arquivo local de auditoria do agente e execute novamente.");
+            WriteFriendlyError(error);
+            return (int)error.ExitCode;
+        }
+
+        var report = AgentSuccessBenchmark.Evaluate(auditEntries);
+        ConsoleLogger.Info("Benchmark de sucesso do modo agente autonomo.");
+        Console.WriteLine(report.ToSummary(minimumAutonomousSuccessRatePercent));
+
+        if (report.TotalSessions == 0)
+        {
+            ConsoleLogger.Info(
+                "Nenhuma sessao auditada do agente foi encontrada para calcular o benchmark.");
+            return (int)CliExitCode.Success;
+        }
+
+        foreach (var session in report.Sessions.Take(AgentBenchmarkSessionSampleLimit))
+        {
+            Console.WriteLine(FormatAgentBenchmarkSession(session));
+        }
+
+        if (minimumAutonomousSuccessRatePercent is not { } minimum)
+        {
+            return (int)CliExitCode.Success;
+        }
+
+        var normalizedMinimum = AgentSuccessBenchmarkReport.NormalizePercent(minimum);
+        if (report.AutonomousSuccessRatePercent >= normalizedMinimum)
+        {
+            return (int)CliExitCode.Success;
+        }
+
+        var thresholdError = CliFriendlyError.Runtime(
+            detail:
+                "Taxa de sucesso autonomo abaixo do minimo configurado " +
+                $"({AgentSuccessBenchmarkReport.FormatPercent(report.AutonomousSuccessRatePercent)} < " +
+                $"{AgentSuccessBenchmarkReport.FormatPercent(normalizedMinimum)}).",
+            suggestion:
+                "Revise sessoes com intervencao ou falha antes de promover o modo agente.");
+        WriteFriendlyError(thresholdError);
+        return (int)thresholdError.ExitCode;
+    }
+
     private static AgentAutonomousLoopResult ExecuteAgentAutonomousLoop(
         AgentExecutionPlan executionPlan,
         string? model,
@@ -2744,15 +3097,21 @@ internal static class Program
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         AgentAutonomousLoopState initialLoopState,
         PromptExecutionCheckpointContext checkpointContext,
-        IToolRuntime toolRuntime)
+        IToolRuntime toolRuntime,
+        AgentAuditContext auditContext,
+        AgentStableStateStore stableStateStore,
+        AgentStableStateSnapshot initialStableState)
     {
         var previousVerificationOutput = initialLoopState.PreviousVerificationOutput;
         var previousRefinementOutput = initialLoopState.PreviousRefinementOutput;
         var resumedElapsed = initialLoopState.Elapsed;
         var stopwatch = Stopwatch.StartNew();
         var accumulatedCost = initialLoopState.AccumulatedCost;
+        var lastStableState = initialStableState;
 
         for (var iteration = initialLoopState.NextIteration; iteration <= sessionBudget.MaxSteps; iteration++)
         {
@@ -2775,6 +3134,16 @@ internal static class Program
                     PreviousRefinementOutput: previousRefinementOutput,
                     Elapsed: elapsedAtIterationStart,
                     AccumulatedCost: accumulatedCost));
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "iteration",
+                eventType: "lifecycle",
+                status: "started",
+                summary: $"Iteracao {iteration}/{sessionBudget.MaxSteps} iniciada.",
+                detail:
+                    $"elapsed={FormatRequiredBudgetDuration(elapsedAtIterationStart)}; " +
+                    $"accumulated_cost={FormatRequiredBudgetValue(accumulatedCost)}.");
 
             ConsoleLogger.Info(
                 $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase plan.");
@@ -2782,6 +3151,8 @@ internal static class Program
                 executionPlan,
                 iteration,
                 projectContext,
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
                 previousVerificationOutput,
                 previousRefinementOutput);
             var planResult = ExecutePromptAndCapture(
@@ -2792,12 +3163,30 @@ internal static class Program
                 checkpointContext);
             if (planResult.WasCancelled)
             {
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "plan",
+                    eventType: "decision",
+                    status: "cancelled",
+                    summary: "Fase plan cancelada.",
+                    detail: "Cancelamento solicitado durante execucao do prompt de planejamento.");
                 return AgentAutonomousLoopResult.Cancelled(
                     iteration,
                     GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
                     accumulatedCost);
             }
 
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "plan",
+                eventType: "decision",
+                status: "completed",
+                summary: "Plano tatico produzido para a iteracao.",
+                detail: BuildPromptContextExcerpt(
+                    planResult.StreamMetrics.ResponseText,
+                    "Plano tatico sem conteudo retornado."));
             accumulatedCost += EstimateAgentStepCost(planPrompt, planResult.StreamMetrics);
             var elapsedAfterPlan = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
             if (ResolveBudgetExceededResult(
@@ -2815,6 +3204,8 @@ internal static class Program
                 executionPlan,
                 iteration,
                 projectContext,
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
                 planResult.StreamMetrics.ResponseText,
                 previousRefinementOutput);
             var executeResult = ExecutePromptAndCapture(
@@ -2825,6 +3216,14 @@ internal static class Program
                 checkpointContext);
             if (executeResult.WasCancelled)
             {
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "execute",
+                    eventType: "change",
+                    status: "cancelled",
+                    summary: "Fase execute cancelada.",
+                    detail: "Cancelamento solicitado durante execucao do prompt de execucao.");
                 return AgentAutonomousLoopResult.Cancelled(
                     iteration,
                     GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
@@ -2834,15 +3233,30 @@ internal static class Program
             var executeEvidence = ParseAgentCodeChangeEvidence(
                 executeResult.StreamMetrics.ResponseText);
             ConsoleLogger.Info(BuildAgentCodeChangeEvidenceLogMessage(executeEvidence));
+            AppendAgentChangeAuditEntry(
+                auditContext,
+                iteration,
+                phase: "execute",
+                evidence: executeEvidence,
+                detail: BuildPromptContextExcerpt(
+                    executeResult.StreamMetrics.ResponseText,
+                    "Fase execute sem conteudo retornado."));
             var validationReport = ExecuteAgentValidationAfterChangeBlock(
                 executeEvidence,
                 projectContext,
-                toolRuntime);
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
+                toolRuntime,
+                auditContext,
+                iteration,
+                phase: "validation");
             var latestExecutionOutput = executeResult.StreamMetrics.ResponseText;
             var autoCorrectionResult = ExecuteAgentAutoCorrectionWhenValidationFails(
                 executionPlan,
                 iteration,
                 projectContext,
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
                 planResult.StreamMetrics.ResponseText,
                 latestExecutionOutput,
                 executeEvidence,
@@ -2851,7 +3265,8 @@ internal static class Program
                 promptExecutor,
                 cancelSignalRegistration,
                 checkpointContext,
-                toolRuntime);
+                toolRuntime,
+                auditContext);
             if (autoCorrectionResult.WasCancelled)
             {
                 return AgentAutonomousLoopResult.Cancelled(
@@ -2863,6 +3278,43 @@ internal static class Program
             latestExecutionOutput = autoCorrectionResult.LatestExecutionOutput;
             executeEvidence = autoCorrectionResult.LatestChangeEvidence;
             validationReport = autoCorrectionResult.ValidationReport;
+
+            if (ShouldCaptureAgentStableStateAfterValidation(validationReport))
+            {
+                if (!TryCaptureAgentStableStateAfterValidation(
+                    stableStateStore,
+                    projectContext.WorkspaceRootDirectory,
+                    auditContext,
+                    iteration,
+                    out lastStableState))
+                {
+                    return AgentAutonomousLoopResult.NotConcluded(
+                        iteration,
+                        GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                        accumulatedCost);
+                }
+            }
+            else if (ShouldRollbackAgentStableStateAfterDegradation(validationReport, executeEvidence))
+            {
+                if (!TryRollbackAgentStableStateAfterDegradation(
+                    stableStateStore,
+                    lastStableState,
+                    validationReport,
+                    executeEvidence,
+                    auditContext,
+                    iteration,
+                    out var rollbackResult))
+                {
+                    return AgentAutonomousLoopResult.NotConcluded(
+                        iteration,
+                        GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                        accumulatedCost);
+                }
+
+                latestExecutionOutput = BuildAgentExecutionOutputWithRollback(
+                    latestExecutionOutput,
+                    rollbackResult);
+            }
 
             accumulatedCost += EstimateAgentStepCost(executePrompt, executeResult.StreamMetrics);
             accumulatedCost += autoCorrectionResult.AdditionalCost;
@@ -2882,6 +3334,8 @@ internal static class Program
                 executionPlan,
                 iteration,
                 projectContext,
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
                 planResult.StreamMetrics.ResponseText,
                 latestExecutionOutput,
                 executeEvidence,
@@ -2894,6 +3348,14 @@ internal static class Program
                 checkpointContext);
             if (verifyResult.WasCancelled)
             {
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "verify",
+                    eventType: "decision",
+                    status: "cancelled",
+                    summary: "Fase verify cancelada.",
+                    detail: "Cancelamento solicitado durante execucao do prompt de verificacao.");
                 return AgentAutonomousLoopResult.Cancelled(
                     iteration,
                     GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
@@ -2913,23 +3375,151 @@ internal static class Program
 
             previousVerificationOutput = verifyResult.StreamMetrics.ResponseText;
             var verificationDecision = ParseAgentVerificationDecision(previousVerificationOutput);
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "verify",
+                eventType: "decision",
+                status: verificationDecision.Status,
+                summary: verificationDecision.IsConcluded
+                    ? "Verificacao marcou objetivo como concluido."
+                    : "Verificacao solicitou refinamento.",
+                detail: BuildPromptContextExcerpt(
+                    previousVerificationOutput,
+                    "Fase verify sem conteudo retornado."));
             if (verificationDecision.IsConcluded && !executeEvidence.IsCompliant)
             {
                 ConsoleLogger.Info(
                     "Verificacao marcou status 'done', mas as evidencias de diff/justificativa por mudanca estao incompletas. Forcando refine.");
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "verify",
+                    eventType: "decision",
+                    status: "forced-refine",
+                    summary: "Verify forcado para refine por evidencia de mudanca incompleta.",
+                    detail: BuildAgentCodeChangeEvidenceSummary(executeEvidence),
+                    changes: BuildAgentAuditChanges(executeEvidence));
                 verificationDecision = AgentVerificationDecision.NeedsRefine("missing-change-evidence");
             }
             else if (verificationDecision.IsConcluded && validationReport.HasFailures)
             {
                 ConsoleLogger.Info(
                     "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.");
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "verify",
+                    eventType: "decision",
+                    status: "forced-refine",
+                    summary: "Verify forcado para refine por falha de validacao automatica.",
+                    detail: BuildAgentValidationReportSummary(validationReport),
+                    changes: BuildAgentAuditChanges(executeEvidence));
                 verificationDecision = AgentVerificationDecision.NeedsRefine("validation-failed");
+            }
+
+            if (verificationDecision.IsConcluded
+                && ShouldRunAgentSelfReviewBeforeConclusion(executeEvidence, validationReport))
+            {
+                ConsoleLogger.Info(
+                    $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase auto-review.");
+                var selfReviewPrompt = BuildAgentSelfReviewPhasePrompt(
+                    executionPlan,
+                    iteration,
+                    projectContext,
+                    autonomyPolicy,
+                    hasExplicitSensitiveOperationApproval,
+                    planResult.StreamMetrics.ResponseText,
+                    latestExecutionOutput,
+                    executeEvidence,
+                    validationReport,
+                    previousVerificationOutput);
+                var selfReviewResult = ExecutePromptAndCapture(
+                    selfReviewPrompt,
+                    model,
+                    promptExecutor,
+                    cancelSignalRegistration,
+                    checkpointContext);
+                if (selfReviewResult.WasCancelled)
+                {
+                    AppendAgentAuditEntry(
+                        auditContext,
+                        iteration,
+                        phase: "auto-review",
+                        eventType: "decision",
+                        status: "cancelled",
+                        summary: "Fase auto-review cancelada.",
+                        detail: "Cancelamento solicitado durante execucao do prompt de auto-review.",
+                        changes: BuildAgentAuditChanges(executeEvidence));
+                    return AgentAutonomousLoopResult.Cancelled(
+                        iteration,
+                        GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
+                        accumulatedCost);
+                }
+
+                accumulatedCost += EstimateAgentStepCost(selfReviewPrompt, selfReviewResult.StreamMetrics);
+                var elapsedAfterSelfReview = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
+                if (ResolveBudgetExceededResult(
+                    sessionBudget,
+                    iteration,
+                    elapsedAfterSelfReview,
+                    accumulatedCost) is AgentAutonomousLoopResult budgetExceededAfterSelfReview)
+                {
+                    return budgetExceededAfterSelfReview;
+                }
+
+                var selfReviewDecision = ParseAgentSelfReviewDecision(
+                    selfReviewResult.StreamMetrics.ResponseText);
+                previousVerificationOutput = BuildAgentVerificationOutputWithSelfReview(
+                    previousVerificationOutput,
+                    selfReviewResult.StreamMetrics.ResponseText);
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "auto-review",
+                    eventType: "decision",
+                    status: selfReviewDecision.Status,
+                    summary: selfReviewDecision.IsApproved
+                        ? "Auto-review aprovou a propria mudanca."
+                        : "Auto-review solicitou refinamento antes da conclusao.",
+                    detail: BuildPromptContextExcerpt(
+                        selfReviewResult.StreamMetrics.ResponseText,
+                        "Fase auto-review sem conteudo retornado."),
+                    changes: BuildAgentAuditChanges(executeEvidence));
+
+                if (selfReviewDecision.IsApproved)
+                {
+                    ConsoleLogger.Info(
+                        "Auto-review aprovou a propria mudanca antes da conclusao.");
+                }
+                else
+                {
+                    ConsoleLogger.Info(
+                        $"Auto-review marcou status '{selfReviewDecision.Status}'. Iniciando fase refine.");
+                    verificationDecision = AgentVerificationDecision.NeedsRefine(AgentVerificationStatusRefine);
+                }
             }
 
             if (verificationDecision.IsConcluded)
             {
+                Console.WriteLine(BuildAgentDeliverySummary(
+                    latestExecutionOutput,
+                    validationReport,
+                    previousVerificationOutput));
                 ConsoleLogger.Info(
                     $"Verificacao marcou status '{verificationDecision.Status}'. Objetivo concluido.");
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "session",
+                    eventType: "decision",
+                    status: "completed",
+                    summary: "Objetivo concluido pelo loop autonomo.",
+                    detail:
+                        $"iterations={iteration}; " +
+                        $"elapsed={FormatRequiredBudgetDuration(GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch))}; " +
+                        $"accumulated_cost={FormatRequiredBudgetValue(accumulatedCost)}.",
+                    changes: BuildAgentAuditChanges(executeEvidence));
                 return AgentAutonomousLoopResult.Concluded(
                     iteration,
                     GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
@@ -2947,9 +3537,11 @@ internal static class Program
                 executionPlan,
                 iteration,
                 projectContext,
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
                 planResult.StreamMetrics.ResponseText,
                 latestExecutionOutput,
-                verifyResult.StreamMetrics.ResponseText);
+                previousVerificationOutput);
             var refineResult = ExecutePromptAndCapture(
                 refinePrompt,
                 model,
@@ -2958,12 +3550,30 @@ internal static class Program
                 checkpointContext);
             if (refineResult.WasCancelled)
             {
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "refine",
+                    eventType: "decision",
+                    status: "cancelled",
+                    summary: "Fase refine cancelada.",
+                    detail: "Cancelamento solicitado durante execucao do prompt de refinamento.");
                 return AgentAutonomousLoopResult.Cancelled(
                     iteration,
                     GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch),
                     accumulatedCost);
             }
 
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "refine",
+                eventType: "decision",
+                status: "completed",
+                summary: "Refinamento produzido para a proxima iteracao.",
+                detail: BuildPromptContextExcerpt(
+                    refineResult.StreamMetrics.ResponseText,
+                    "Fase refine sem conteudo retornado."));
             accumulatedCost += EstimateAgentStepCost(refinePrompt, refineResult.StreamMetrics);
             var elapsedAfterRefine = GetCurrentAgentLoopElapsed(resumedElapsed, stopwatch);
             if (ResolveBudgetExceededResult(
@@ -2987,30 +3597,220 @@ internal static class Program
     private static AgentValidationReport ExecuteAgentValidationAfterChangeBlock(
         AgentCodeChangeEvidence executeEvidence,
         AgentProjectContextSnapshot projectContext,
-        IToolRuntime toolRuntime)
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
+        IToolRuntime toolRuntime,
+        AgentAuditContext auditContext,
+        int iteration,
+        string phase)
     {
-        if (!ShouldRunAgentValidationAfterChangeBlock(executeEvidence))
+        if (TryBuildAgentSensitiveOperationBlockReport(
+            executeEvidence,
+            hasExplicitSensitiveOperationApproval,
+            auditContext,
+            iteration,
+            phase,
+            out var blockedReport))
         {
+            return blockedReport;
+        }
+
+        if (!ShouldRunAgentValidationAfterChangeBlock(executeEvidence, autonomyPolicy))
+        {
+            if (executeEvidence.HasDeclaredCodeChanges && !autonomyPolicy.AllowsAutomaticValidation)
+            {
+                ConsoleLogger.Info(
+                    $"Validacao automatica pos-mudanca bloqueada pelo nivel de autonomia '{autonomyPolicy.LevelName}'.");
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase,
+                    eventType: "decision",
+                    status: "blocked",
+                    summary: "Validacao automatica bloqueada pelo nivel de autonomia.",
+                    detail: $"autonomy={autonomyPolicy.LevelName}; {BuildAgentCodeChangeEvidenceSummary(executeEvidence)}",
+                    changes: BuildAgentAuditChanges(executeEvidence));
+            }
+            else
+            {
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase,
+                    eventType: "decision",
+                    status: "skipped",
+                    summary: "Validacao automatica nao requerida.",
+                    detail: BuildAgentCodeChangeEvidenceSummary(executeEvidence),
+                    changes: BuildAgentAuditChanges(executeEvidence));
+            }
+
             return AgentValidationReport.NotRequired();
         }
 
         ConsoleLogger.Info(
-            "Validacao automatica pos-mudanca: bloco de alteracoes detectado; executando build, test e lint.");
+            "Validacao automatica pos-mudanca: bloco de alteracoes detectado; executando build, test, lint e gate de cobertura quando disponivel.");
 
         var runner = new AgentValidationCommandRunner(toolRuntime);
+        var validationStartedUtc = DateTimeOffset.UtcNow;
         var validationReport = runner
             .RunAsync(projectContext.WorkspaceRootDirectory, CancellationToken.None)
             .GetAwaiter()
             .GetResult();
+        validationReport = ApplyAgentMinimumCoverageGate(
+            validationReport,
+            projectContext.WorkspaceRootDirectory,
+            validationStartedUtc);
 
         WriteAgentValidationLog(validationReport);
+        AppendAgentValidationAuditEntries(
+            auditContext,
+            iteration,
+            phase,
+            validationReport);
         return validationReport;
+    }
+
+    private static AgentValidationReport ApplyAgentMinimumCoverageGate(
+        AgentValidationReport validationReport,
+        string workspaceRootDirectory,
+        DateTimeOffset validationStartedUtc)
+    {
+        if (!validationReport.WasRequired
+            || !validationReport.CommandsDiscovered
+            || validationReport.Results.Any(static result =>
+                string.Equals(result.Name, AgentCoverageValidationName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return validationReport;
+        }
+
+        var coverageEvaluation = AgentTestCoverageGate.Evaluate(
+            workspaceRootDirectory,
+            validationReport.Results,
+            AgentTestCoverageGate.DefaultMinimumLineCoveragePercent,
+            validationStartedUtc);
+        if (!coverageEvaluation.WasCoverageDiscovered || coverageEvaluation.IsSatisfied)
+        {
+            return validationReport;
+        }
+
+        var message =
+            "Cobertura minima de testes nao atendida. " +
+            coverageEvaluation.ToSummary();
+        ConsoleLogger.Info(message);
+        var results = validationReport.Results
+            .Concat(
+            [
+                new AgentValidationCommandResult(
+                    Name: AgentCoverageValidationName,
+                    CommandLine: "agent-coverage-threshold",
+                    IsSuccess: false,
+                    ExitCode: 1,
+                    StdOut: coverageEvaluation.ToSummary(),
+                    StdErr: message,
+                    Duration: TimeSpan.Zero,
+                    IsTimedOut: false,
+                    IsCancelled: false)
+            ])
+            .ToArray();
+
+        return validationReport with
+        {
+            Results = results
+        };
+    }
+
+    private static bool ShouldRunAgentSelfReviewBeforeConclusion(
+        AgentCodeChangeEvidence executeEvidence,
+        AgentValidationReport validationReport)
+    {
+        return executeEvidence.HasDeclaredCodeChanges
+            && executeEvidence.IsCompliant
+            && !validationReport.HasFailures;
+    }
+
+    private static bool TryBuildAgentSensitiveOperationBlockReport(
+        AgentCodeChangeEvidence executeEvidence,
+        bool hasExplicitSensitiveOperationApproval,
+        AgentAuditContext auditContext,
+        int iteration,
+        string phase,
+        out AgentValidationReport validationReport)
+    {
+        validationReport = default;
+
+        if (hasExplicitSensitiveOperationApproval || !executeEvidence.HasDestructiveChanges)
+        {
+            return false;
+        }
+
+        var destructiveChanges = BuildAgentDestructiveChangeSummary(executeEvidence);
+        var message =
+            "Operacao destrutiva declarada na fase execute sem aprovacao explicita da sessao. " +
+            $"Reexecute o comando agent com '{AgentApproveSensitiveFlag}' para permitir delete, move ou rename; " +
+            $"mudancas bloqueadas: {destructiveChanges}.";
+        ConsoleLogger.Info(message);
+        AppendAgentAuditEntry(
+            auditContext,
+            iteration,
+            phase,
+            eventType: "decision",
+            status: "blocked",
+            summary: "Operacao destrutiva bloqueada por falta de aprovacao explicita.",
+            detail: message,
+            commandLine: "agent-sensitive-operation-approval",
+            exitCode: ShellCommandPermissionPolicy.BlockedCommandExitCode,
+            isSuccess: false,
+            duration: TimeSpan.Zero,
+            changes: BuildAgentAuditChanges(executeEvidence));
+
+        validationReport = new AgentValidationReport(
+            WasRequired: true,
+            CommandsDiscovered: true,
+            Results:
+            [
+                new AgentValidationCommandResult(
+                    Name: AgentGovernanceValidationName,
+                    CommandLine: "agent-sensitive-operation-approval",
+                    IsSuccess: false,
+                    ExitCode: ShellCommandPermissionPolicy.BlockedCommandExitCode,
+                    StdOut: string.Empty,
+                    StdErr: message,
+                    Duration: TimeSpan.Zero,
+                    IsTimedOut: false,
+                    IsCancelled: false)
+            ]);
+        WriteAgentValidationLog(validationReport);
+        return true;
+    }
+
+    private static string BuildAgentDestructiveChangeSummary(AgentCodeChangeEvidence executeEvidence)
+    {
+        var changes = executeEvidence.ChangedFiles
+            .Where(static file => AgentCodeChangeEvidence.IsDestructiveChangeKind(file.Kind))
+            .Select(static file =>
+            {
+                var path = string.IsNullOrWhiteSpace(file.Path)
+                    ? "<nao informado>"
+                    : file.Path;
+                var kind = string.IsNullOrWhiteSpace(file.Kind)
+                    ? "unknown"
+                    : file.Kind;
+                return $"{path} ({kind})";
+            })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return changes.Length == 0
+            ? "<sem detalhe>"
+            : string.Join(", ", changes);
     }
 
     private static AgentAutoCorrectionResult ExecuteAgentAutoCorrectionWhenValidationFails(
         AgentExecutionPlan executionPlan,
         int iteration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         string latestPlanOutput,
         string latestExecutionOutput,
         AgentCodeChangeEvidence latestChangeEvidence,
@@ -3019,10 +3819,39 @@ internal static class Program
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         PromptExecutionCheckpointContext checkpointContext,
-        IToolRuntime toolRuntime)
+        IToolRuntime toolRuntime,
+        AgentAuditContext auditContext)
     {
         if (!ShouldRunAgentAutoCorrection(validationReport))
         {
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "auto-correct",
+                eventType: "decision",
+                status: "skipped",
+                summary: "Auto-correcao nao requerida.",
+                detail: BuildAgentValidationReportSummary(validationReport),
+                changes: BuildAgentAuditChanges(latestChangeEvidence));
+            return AgentAutoCorrectionResult.NotRequired(
+                latestExecutionOutput,
+                latestChangeEvidence,
+                validationReport);
+        }
+
+        if (!autonomyPolicy.AllowsAutoCorrection)
+        {
+            ConsoleLogger.Info(
+                $"Auto-correcao de validacao bloqueada pelo nivel de autonomia '{autonomyPolicy.LevelName}'.");
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "auto-correct",
+                eventType: "decision",
+                status: "blocked",
+                summary: "Auto-correcao bloqueada pelo nivel de autonomia.",
+                detail: $"autonomy={autonomyPolicy.LevelName}; {BuildAgentValidationReportSummary(validationReport)}",
+                changes: BuildAgentAuditChanges(latestChangeEvidence));
             return AgentAutoCorrectionResult.NotRequired(
                 latestExecutionOutput,
                 latestChangeEvidence,
@@ -3038,11 +3867,22 @@ internal static class Program
         for (var attempt = 1; attempt <= AgentAutoCorrectionMaxAttempts; attempt++)
         {
             ConsoleLogger.Info(
-                $"Auto-correcao de validacao: tentativa {attempt}/{AgentAutoCorrectionMaxAttempts} apos falha em build/test/lint.");
+                $"Auto-correcao de validacao: tentativa {attempt}/{AgentAutoCorrectionMaxAttempts} apos falha em build/test/lint/cobertura.");
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "auto-correct",
+                eventType: "decision",
+                status: "started",
+                summary: $"Auto-correcao iniciada: tentativa {attempt}/{AgentAutoCorrectionMaxAttempts}.",
+                detail: BuildAgentValidationReportSummary(currentValidationReport),
+                changes: BuildAgentAuditChanges(currentChangeEvidence));
             var correctionPrompt = BuildAgentAutoCorrectionPrompt(
                 executionPlan,
                 iteration,
                 projectContext,
+                autonomyPolicy,
+                hasExplicitSensitiveOperationApproval,
                 latestPlanOutput,
                 currentExecutionOutput,
                 currentValidationReport,
@@ -3056,6 +3896,15 @@ internal static class Program
                 checkpointContext);
             if (correctionResult.WasCancelled)
             {
+                AppendAgentAuditEntry(
+                    auditContext,
+                    iteration,
+                    phase: "auto-correct",
+                    eventType: "change",
+                    status: "cancelled",
+                    summary: $"Auto-correcao cancelada na tentativa {attempt}/{AgentAutoCorrectionMaxAttempts}.",
+                    detail: "Cancelamento solicitado durante execucao do prompt de auto-correcao.",
+                    changes: BuildAgentAuditChanges(currentChangeEvidence));
                 return AgentAutoCorrectionResult.Cancelled(
                     currentExecutionOutput,
                     currentChangeEvidence,
@@ -3074,6 +3923,14 @@ internal static class Program
 
             var correctionEvidence = ParseAgentCodeChangeEvidence(correctionOutput);
             ConsoleLogger.Info(BuildAgentAutoCorrectionEvidenceLogMessage(attempt, correctionEvidence));
+            AppendAgentChangeAuditEntry(
+                auditContext,
+                iteration,
+                phase: "auto-correct",
+                evidence: correctionEvidence,
+                detail: BuildPromptContextExcerpt(
+                    correctionOutput,
+                    "Tentativa de auto-correcao sem conteudo retornado."));
             currentExecutionOutput = BuildAgentExecutionOutputWithAutoCorrection(
                 latestExecutionOutput,
                 autoCorrectionTranscript.ToString());
@@ -3083,7 +3940,7 @@ internal static class Program
                 currentChangeEvidence = correctionEvidence;
             }
 
-            if (!ShouldRunAgentValidationAfterChangeBlock(correctionEvidence))
+            if (!ShouldRunAgentValidationAfterChangeBlock(correctionEvidence, autonomyPolicy))
             {
                 ConsoleLogger.Info(
                     "Auto-correcao de validacao: tentativa nao declarou bloco de mudancas validavel; mantendo falha atual.");
@@ -3094,7 +3951,12 @@ internal static class Program
                 currentValidationReport = ExecuteAgentValidationAfterChangeBlock(
                     correctionEvidence,
                     projectContext,
-                    toolRuntime);
+                    autonomyPolicy,
+                    hasExplicitSensitiveOperationApproval,
+                    toolRuntime,
+                    auditContext,
+                    iteration,
+                    phase: "auto-correct-validation");
 
                 if (!currentValidationReport.HasFailures)
                 {
@@ -3132,7 +3994,15 @@ internal static class Program
     {
         return validationReport.WasRequired
             && validationReport.CommandsDiscovered
-            && validationReport.HasFailures;
+            && validationReport.HasFailures
+            && !IsAgentGovernanceBlockedValidation(validationReport);
+    }
+
+    private static bool IsAgentGovernanceBlockedValidation(AgentValidationReport validationReport)
+    {
+        return validationReport.Results.Any(static result =>
+            string.Equals(result.Name, AgentGovernanceValidationName, StringComparison.OrdinalIgnoreCase)
+            && result.ExitCode == ShellCommandPermissionPolicy.BlockedCommandExitCode);
     }
 
     private static void AppendAgentAutoCorrectionTranscript(
@@ -3170,9 +4040,178 @@ internal static class Program
             """;
     }
 
-    private static bool ShouldRunAgentValidationAfterChangeBlock(
+    private static bool ShouldCaptureAgentStableStateAfterValidation(
+        AgentValidationReport validationReport)
+    {
+        return validationReport.IsSuccessful;
+    }
+
+    private static bool ShouldRollbackAgentStableStateAfterDegradation(
+        AgentValidationReport validationReport,
         AgentCodeChangeEvidence executeEvidence)
     {
+        return validationReport.WasRequired
+            && validationReport.HasFailures
+            && executeEvidence.RequiresValidation;
+    }
+
+    private static bool TryCaptureAgentStableStateAfterValidation(
+        AgentStableStateStore stableStateStore,
+        string workspaceRootDirectory,
+        AgentAuditContext auditContext,
+        int iteration,
+        out AgentStableStateSnapshot stableStateSnapshot)
+    {
+        try
+        {
+            stableStateSnapshot = stableStateStore.Capture(workspaceRootDirectory);
+            ConsoleLogger.Info(
+                $"Estado estavel atualizado apos validacao automatica bem-sucedida: {stableStateSnapshot.FileCount} arquivo(s).");
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "stable-state",
+                eventType: "snapshot",
+                status: "captured",
+                summary: "Estado estavel atualizado apos validacao automatica bem-sucedida.",
+                detail:
+                    $"files={stableStateSnapshot.FileCount}; " +
+                    $"workspace={stableStateSnapshot.WorkspaceRootDirectory}; " +
+                    $"created_at_utc={stableStateSnapshot.CreatedAtUtc:O}.");
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or FileNotFoundException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            stableStateSnapshot = default;
+            ConsoleLogger.Error(
+                $"Nao foi possivel atualizar o estado estavel para rollback automatico. {ex.Message}");
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "stable-state",
+                eventType: "snapshot",
+                status: "failed",
+                summary: "Falha ao atualizar estado estavel apos validacao.",
+                detail: ex.Message);
+            return false;
+        }
+    }
+
+    private static bool TryRollbackAgentStableStateAfterDegradation(
+        AgentStableStateStore stableStateStore,
+        AgentStableStateSnapshot stableStateSnapshot,
+        AgentValidationReport validationReport,
+        AgentCodeChangeEvidence executeEvidence,
+        AgentAuditContext auditContext,
+        int iteration,
+        out AgentStableStateRestoreResult rollbackResult)
+    {
+        try
+        {
+            rollbackResult = stableStateStore.Restore(stableStateSnapshot);
+            var rollbackSummary = BuildAgentRollbackResultSummary(rollbackResult);
+            ConsoleLogger.Info(
+                $"Rollback automatico para ultimo estado estavel aplicado: {rollbackSummary}");
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "rollback",
+                eventType: "restore",
+                status: "restored",
+                summary: "Rollback automatico aplicado apos degradacao detectada.",
+                detail:
+                    $"{rollbackSummary}{Environment.NewLine}" +
+                    BuildAgentValidationReportSummary(validationReport),
+                changes: BuildAgentAuditChanges(executeEvidence));
+            return true;
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or FileNotFoundException
+            or IOException
+            or UnauthorizedAccessException)
+        {
+            rollbackResult = default;
+            ConsoleLogger.Error(
+                $"Rollback automatico para ultimo estado estavel falhou. {ex.Message}");
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase: "rollback",
+                eventType: "restore",
+                status: "failed",
+                summary: "Falha ao aplicar rollback automatico apos degradacao detectada.",
+                detail:
+                    $"{ex.Message}{Environment.NewLine}" +
+                    BuildAgentValidationReportSummary(validationReport),
+                changes: BuildAgentAuditChanges(executeEvidence));
+            return false;
+        }
+    }
+
+    private static string BuildAgentExecutionOutputWithRollback(
+        string latestExecutionOutput,
+        AgentStableStateRestoreResult rollbackResult)
+    {
+        return
+            $"""
+            {BuildPromptContextExcerpt(latestExecutionOutput, "Sem evidencias de execucao anteriores.")}
+
+            [ROLLBACK AUTOMATICO]
+            Ultimo estado estavel restaurado apos degradacao detectada por validacao automatica.
+            {BuildAgentRollbackResultSummary(rollbackResult)}
+            """;
+    }
+
+    private static string BuildAgentRollbackResultSummary(
+        AgentStableStateRestoreResult rollbackResult)
+    {
+        return
+            $"arquivos-restaurados={rollbackResult.RestoredFileCount}; " +
+            $"arquivos-removidos={rollbackResult.RemovedFileCount}; " +
+            $"diretorios-removidos={rollbackResult.RemovedDirectoryCount}; " +
+            $"caminhos={BuildAgentRollbackChangedPathsSummary(rollbackResult.ChangedPaths)}.";
+    }
+
+    private static string BuildAgentRollbackChangedPathsSummary(IReadOnlyList<string> changedPaths)
+    {
+        if (changedPaths is null || changedPaths.Count == 0)
+        {
+            return "<nenhum>";
+        }
+
+        const int maxPaths = 10;
+        var paths = changedPaths
+            .Where(static path => !string.IsNullOrWhiteSpace(path))
+            .Take(maxPaths)
+            .ToArray();
+
+        if (paths.Length == 0)
+        {
+            return "<nenhum>";
+        }
+
+        var summary = string.Join(", ", paths);
+        return changedPaths.Count <= paths.Length
+            ? summary
+            : $"{summary}, ... (+{changedPaths.Count - paths.Length})";
+    }
+
+    private static bool ShouldRunAgentValidationAfterChangeBlock(
+        AgentCodeChangeEvidence executeEvidence,
+        AgentAutonomyPolicy autonomyPolicy)
+    {
+        if (!autonomyPolicy.AllowsAutomaticValidation)
+        {
+            return false;
+        }
+
         return executeEvidence.HasDeclaredCodeChanges
             && executeEvidence.IsCompliant;
     }
@@ -3197,6 +4236,206 @@ internal static class Program
             ConsoleLogger.Info(
                 $"Validacao automatica '{result.Name}' {status} " +
                 $"(exit_code={result.ExitCode}, duracao={FormatRequiredBudgetDuration(result.Duration)}).");
+        }
+    }
+
+    private static void AppendAgentValidationAuditEntries(
+        AgentAuditContext auditContext,
+        int iteration,
+        string phase,
+        AgentValidationReport validationReport)
+    {
+        if (!validationReport.WasRequired)
+        {
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase,
+                eventType: "decision",
+                status: "skipped",
+                summary: "Validacao automatica nao requerida.",
+                detail: BuildAgentValidationReportSummary(validationReport));
+            return;
+        }
+
+        if (!validationReport.CommandsDiscovered)
+        {
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase,
+                eventType: "decision",
+                status: "skipped",
+                summary: "Nenhum comando de validacao foi descoberto.",
+                detail: BuildAgentValidationReportSummary(validationReport));
+            return;
+        }
+
+        foreach (var result in validationReport.Results)
+        {
+            var status = result.IsCancelled
+                ? "cancelled"
+                : result.IsTimedOut
+                    ? "timed-out"
+                    : result.IsSuccess
+                        ? "passed"
+                        : "failed";
+            AppendAgentAuditEntry(
+                auditContext,
+                iteration,
+                phase,
+                eventType: "command",
+                status,
+                summary: $"Comando de validacao '{result.Name}' {status}.",
+                detail: BuildAgentValidationCommandAuditDetail(result),
+                toolName: ResolveAgentValidationAuditToolName(result),
+                commandLine: result.CommandLine,
+                exitCode: result.ExitCode,
+                isSuccess: result.IsSuccess,
+                duration: result.Duration,
+                isTimedOut: result.IsTimedOut,
+                isCancelled: result.IsCancelled);
+        }
+    }
+
+    private static string ResolveAgentValidationAuditToolName(AgentValidationCommandResult result)
+    {
+        return string.Equals(result.Name, AgentCoverageValidationName, StringComparison.OrdinalIgnoreCase)
+            ? "agent"
+            : "shell";
+    }
+
+    private static string BuildAgentValidationCommandAuditDetail(AgentValidationCommandResult result)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine($"name={result.Name}");
+        builder.AppendLine($"exit_code={result.ExitCode}");
+        builder.AppendLine($"duration={FormatRequiredBudgetDuration(result.Duration)}");
+        builder.AppendLine($"timed_out={(result.IsTimedOut ? "sim" : "nao")}");
+        builder.AppendLine($"cancelled={(result.IsCancelled ? "sim" : "nao")}");
+
+        if (!string.IsNullOrWhiteSpace(result.StdOut))
+        {
+            builder.AppendLine(
+                $"stdout={BuildPromptContextExcerpt(result.StdOut, "<vazio>", AgentValidationOutputExcerptMaxCharacters)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.StdErr))
+        {
+            builder.AppendLine(
+                $"stderr={BuildPromptContextExcerpt(result.StdErr, "<vazio>", AgentValidationOutputExcerptMaxCharacters)}");
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static void AppendAgentChangeAuditEntry(
+        AgentAuditContext auditContext,
+        int iteration,
+        string phase,
+        AgentCodeChangeEvidence evidence,
+        string detail)
+    {
+        var status = evidence.HasDeclaredCodeChanges
+            ? "changed"
+            : evidence.DeclaredNoCodeChanges
+                ? "no-change"
+                : "unknown";
+        AppendAgentAuditEntry(
+            auditContext,
+            iteration,
+            phase,
+            eventType: "change",
+            status,
+            summary: BuildAgentCodeChangeEvidenceSummary(evidence),
+            detail,
+            changes: BuildAgentAuditChanges(evidence));
+    }
+
+    private static IReadOnlyList<AgentAuditChangeEntry> BuildAgentAuditChanges(
+        AgentCodeChangeEvidence evidence)
+    {
+        if (evidence.ChangedFiles is null || evidence.ChangedFiles.Count == 0)
+        {
+            return Array.Empty<AgentAuditChangeEntry>();
+        }
+
+        return evidence.ChangedFiles
+            .Select(static file => new AgentAuditChangeEntry(
+                Path: string.IsNullOrWhiteSpace(file.Path) ? "<nao informado>" : file.Path,
+                Kind: string.IsNullOrWhiteSpace(file.Kind) ? "unknown" : file.Kind,
+                IsDestructive: AgentCodeChangeEvidence.IsDestructiveChangeKind(file.Kind)))
+            .ToArray();
+    }
+
+    private static string? AppendAgentAuditEntry(
+        AgentAuditContext auditContext,
+        int iteration,
+        string phase,
+        string eventType,
+        string status,
+        string summary,
+        string detail,
+        string? toolName = null,
+        string? commandLine = null,
+        int? exitCode = null,
+        bool? isSuccess = null,
+        TimeSpan? duration = null,
+        bool isTimedOut = false,
+        bool isCancelled = false,
+        IReadOnlyList<AgentAuditChangeEntry>? changes = null)
+    {
+        var entry = new AgentAuditEntry(
+            TimestampUtc: DateTimeOffset.UtcNow,
+            SessionId: auditContext.SessionId,
+            SessionSequence: Interlocked.Increment(ref _agentAuditSequence),
+            Command: "agent",
+            WorkspaceRootDirectory: auditContext.WorkspaceRootDirectory,
+            Objective: auditContext.Objective,
+            Model: auditContext.Model,
+            AutonomyLevel: auditContext.AutonomyLevel,
+            HasExplicitSensitiveOperationApproval: auditContext.HasExplicitSensitiveOperationApproval,
+            Iteration: Math.Max(0, iteration),
+            Phase: phase,
+            EventType: eventType,
+            Status: status,
+            Summary: summary,
+            Detail: detail,
+            ToolName: toolName,
+            CommandLine: commandLine,
+            ExitCode: exitCode,
+            IsSuccess: isSuccess,
+            Duration: duration,
+            IsTimedOut: isTimedOut,
+            IsCancelled: isCancelled,
+            Changes: changes ?? Array.Empty<AgentAuditChangeEntry>());
+
+        return TryAppendAgentAuditEntry(entry, auditContext.AgentAuditAppender);
+    }
+
+    private static string? TryAppendAgentAuditEntry(
+        AgentAuditEntry auditEntry,
+        Func<AgentAuditEntry, string> agentAuditAppender)
+    {
+        ArgumentNullException.ThrowIfNull(agentAuditAppender);
+
+        try
+        {
+            var auditPath = agentAuditAppender(auditEntry);
+            return string.IsNullOrWhiteSpace(auditPath)
+                ? null
+                : auditPath.Trim();
+        }
+        catch (Exception ex) when (ex is ArgumentException
+            or InvalidOperationException
+            or DirectoryNotFoundException
+            or IOException
+            or JsonException
+            or UnauthorizedAccessException)
+        {
+            ConsoleLogger.Error(
+                $"Nao foi possivel registrar a trilha de auditoria local do agente. {ex.Message}");
+            return null;
         }
     }
 
@@ -3269,6 +4508,32 @@ internal static class Program
                 DocumentationFileSamples: [],
                 RecentGitCommits: [],
                 GitHistorySummary: $"indisponivel ({failureDetail})");
+        }
+    }
+
+    private static bool TryLoadAgentAutonomyPolicy(
+        string workspaceRootDirectory,
+        out AgentAutonomyPolicy autonomyPolicy,
+        out CliFriendlyError error)
+    {
+        try
+        {
+            autonomyPolicy = AgentAutonomyPolicyFile.Load(workspaceRootDirectory);
+            error = default;
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or DirectoryNotFoundException
+            or IOException
+            or UnauthorizedAccessException
+            or JsonException)
+        {
+            autonomyPolicy = AgentAutonomyPolicy.Default;
+            error = CliFriendlyError.Runtime(
+                detail: $"Nao foi possivel carregar a governanca do modo agente. {ex.Message}",
+                suggestion:
+                $"Corrija o arquivo '.asxrun/{AgentAutonomyPolicyFile.AgentAutonomyPolicyFileName}' do projeto ou remova-o para usar o padrao.");
+            return false;
         }
     }
 
@@ -3719,19 +4984,48 @@ internal static class Program
         return value.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
+    private static string FormatAgentBenchmarkSession(AgentBenchmarkSessionResult session)
+    {
+        var intervention = session.RequiredHumanIntervention
+            ? string.Join(", ", session.HumanInterventionReasons)
+            : "nao";
+        return
+            $"- session={session.SessionId}; " +
+            $"status={FormatAgentBenchmarkSessionStatus(session.Status)}; " +
+            $"autonomia={session.AutonomyLevel}; " +
+            $"iteracoes={session.IterationCount}; " +
+            $"validacoes={session.ValidationCommandCount}; " +
+            $"falhas_validacao={session.FailedValidationCommandCount}; " +
+            $"mudancas={session.ChangeCount}; " +
+            $"intervencao={intervention}.";
+    }
+
+    private static string FormatAgentBenchmarkSessionStatus(AgentBenchmarkSessionStatus status)
+    {
+        return status switch
+        {
+            AgentBenchmarkSessionStatus.Completed => "completed",
+            AgentBenchmarkSessionStatus.Failed => "failed",
+            AgentBenchmarkSessionStatus.Cancelled => "cancelled",
+            _ => "in-progress"
+        };
+    }
+
     private static int ExecuteResume(
         string? sessionId,
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
         Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader,
-        IToolRuntime toolRuntime)
+        IToolRuntime toolRuntime,
+        Func<AgentAuditEntry, string> agentAuditAppender)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(cancelSignalRegistration);
         ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
         ArgumentNullException.ThrowIfNull(executionCheckpointLoader);
         ArgumentNullException.ThrowIfNull(toolRuntime);
+        ArgumentNullException.ThrowIfNull(agentAuditAppender);
 
         ConsoleLogger.Info("Buscando checkpoint de sessao interrompida.");
 
@@ -3837,10 +5131,12 @@ internal static class Program
                     maxSteps: resumeCheckpointState.SessionBudget.MaxSteps,
                     maxTime: resumeCheckpointState.SessionBudget.MaxTime,
                     maxCost: resumeCheckpointState.SessionBudget.MaxCost,
+                    hasExplicitSensitiveOperationApproval: false,
                     promptExecutor,
                     cancelSignalRegistration,
                     executionCheckpointAppender,
                     toolRuntime,
+                    agentAuditAppender,
                     resumeLoopState: resumeCheckpointState.LoopState,
                     checkpointSessionId: checkpointToResume.SessionId);
             }
@@ -3853,10 +5149,12 @@ internal static class Program
                 maxSteps: null,
                 maxTime: null,
                 maxCost: null,
+                hasExplicitSensitiveOperationApproval: false,
                 promptExecutor,
                 cancelSignalRegistration,
                 executionCheckpointAppender,
                 toolRuntime,
+                agentAuditAppender,
                 checkpointSessionId: checkpointToResume.SessionId);
         }
 
@@ -5479,10 +6777,18 @@ internal static class Program
         AgentExecutionPlan executionPlan,
         int iteration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         string previousVerificationOutput,
         string previousRefinementOutput)
     {
-        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "plan");
+        var basePrompt = BuildAgentPromptBase(
+            executionPlan,
+            projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
+            iteration,
+            "plan");
 
         return
             $"""
@@ -5505,10 +6811,18 @@ internal static class Program
         AgentExecutionPlan executionPlan,
         int iteration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         string latestPlanOutput,
         string previousRefinementOutput)
     {
-        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "execute");
+        var basePrompt = BuildAgentPromptBase(
+            executionPlan,
+            projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
+            iteration,
+            "execute");
 
         return
             $"""
@@ -5544,12 +6858,20 @@ internal static class Program
         AgentExecutionPlan executionPlan,
         int iteration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         string latestPlanOutput,
         string latestExecutionOutput,
         AgentCodeChangeEvidence executeEvidence,
         AgentValidationReport validationReport)
     {
-        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "verify");
+        var basePrompt = BuildAgentPromptBase(
+            executionPlan,
+            projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
+            iteration,
+            "verify");
 
         return
             $"""
@@ -5569,11 +6891,64 @@ internal static class Program
             [TAREFA DA FASE VERIFY]
             Verifique se o objetivo ja pode ser considerado concluido.
             Se houver alteracao de codigo sem diff ou sem justificativa tecnica por mudanca, marque refine.
-            Se a validacao automatica pos-mudanca falhou, marque refine e use stdout/stderr para orientar a correcao.
+            Se a validacao automatica pos-mudanca falhou, inclusive cobertura minima de testes, marque refine e use stdout/stderr para orientar a correcao.
             Se ainda houver lacunas, descreva o que precisa ser refinado.
             Comece obrigatoriamente com:
             VERIFICATION_STATUS=<done|refine>
+            Inclua tambem, para o resumo final:
+            RISCOS_RESIDUAIS=<nenhum|descricao curta dos riscos residuais>
+            PROXIMOS_PASSOS=<nenhum|proximo passo objetivo>
             Depois explique a justificativa em topicos curtos.
+            """;
+    }
+
+    private static string BuildAgentSelfReviewPhasePrompt(
+        AgentExecutionPlan executionPlan,
+        int iteration,
+        AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
+        string latestPlanOutput,
+        string latestExecutionOutput,
+        AgentCodeChangeEvidence executeEvidence,
+        AgentValidationReport validationReport,
+        string latestVerificationOutput)
+    {
+        var basePrompt = BuildAgentPromptBase(
+            executionPlan,
+            projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
+            iteration,
+            "auto-review");
+
+        return
+            $"""
+            {basePrompt}
+            [PLANO VALIDADO]
+            {BuildPromptContextExcerpt(latestPlanOutput, "Plano tatico nao disponivel.")}
+
+            [MUDANCA A REVISAR]
+            {BuildPromptContextExcerpt(latestExecutionOutput, "Sem evidencias de execucao disponiveis.")}
+
+            [RASTREABILIDADE DE MUDANCAS DE CODIGO]
+            {BuildAgentCodeChangeEvidenceSummary(executeEvidence)}
+
+            [VALIDACAO AUTOMATICA POS-MUDANCA]
+            {BuildAgentValidationReportSummary(validationReport)}
+
+            [DECISAO DA FASE VERIFY]
+            {BuildPromptContextExcerpt(latestVerificationOutput, "Sem feedback de verificacao.")}
+
+            [TAREFA DA FASE AUTO-REVIEW]
+            Revise criticamente a sua propria mudanca antes de finalizar, como um code reviewer senior.
+            Nao implemente novas mudancas nesta fase; procure problemas de corretude, legibilidade, testes, cobertura minima, seguranca e performance.
+            Se encontrar qualquer lacuna material, marque refine e descreva o ajuste necessario para a proxima iteracao.
+            Comece obrigatoriamente com:
+            SELF_REVIEW_STATUS=<approved|refine>
+            Inclua tambem:
+            SELF_REVIEW_FINDINGS=<nenhum|achados objetivos>
+            Depois explique a decisao em topicos curtos.
             """;
     }
 
@@ -5581,13 +6956,21 @@ internal static class Program
         AgentExecutionPlan executionPlan,
         int iteration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         string latestPlanOutput,
         string latestExecutionOutput,
         AgentValidationReport validationReport,
         int attempt,
         int maxAttempts)
     {
-        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "auto-correct");
+        var basePrompt = BuildAgentPromptBase(
+            executionPlan,
+            projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
+            iteration,
+            "auto-correct");
 
         return
             $"""
@@ -5629,11 +7012,19 @@ internal static class Program
         AgentExecutionPlan executionPlan,
         int iteration,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         string latestPlanOutput,
         string latestExecutionOutput,
         string latestVerificationOutput)
     {
-        var basePrompt = BuildAgentPromptBase(executionPlan, projectContext, iteration, "refine");
+        var basePrompt = BuildAgentPromptBase(
+            executionPlan,
+            projectContext,
+            autonomyPolicy,
+            hasExplicitSensitiveOperationApproval,
+            iteration,
+            "refine");
 
         return
             $"""
@@ -5730,6 +7121,84 @@ internal static class Program
         return false;
     }
 
+    private static AgentSelfReviewDecision ParseAgentSelfReviewDecision(string selfReviewOutput)
+    {
+        if (TryParseAgentSelfReviewStatus(selfReviewOutput, out var status))
+        {
+            return string.Equals(status, AgentSelfReviewStatusApproved, StringComparison.OrdinalIgnoreCase)
+                ? AgentSelfReviewDecision.Approved(status)
+                : AgentSelfReviewDecision.NeedsRefine(status);
+        }
+
+        ConsoleLogger.Info(
+            "Nao foi possivel identificar SELF_REVIEW_STATUS explicito. Forcando refine.");
+        return AgentSelfReviewDecision.NeedsRefine("missing-status");
+    }
+
+    private static bool TryParseAgentSelfReviewStatus(string selfReviewOutput, out string status)
+    {
+        status = string.Empty;
+        if (string.IsNullOrWhiteSpace(selfReviewOutput))
+        {
+            return false;
+        }
+
+        const string selfReviewStatusPrefix = "SELF_REVIEW_STATUS=";
+        const string autoReviewStatusPrefix = "AUTO_REVIEW_STATUS=";
+        var lines = selfReviewOutput
+            .Replace("\r", "\n", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var line in lines)
+        {
+            string rawStatus;
+            if (line.StartsWith(selfReviewStatusPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                rawStatus = line[selfReviewStatusPrefix.Length..].Trim();
+            }
+            else if (line.StartsWith(autoReviewStatusPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                rawStatus = line[autoReviewStatusPrefix.Length..].Trim();
+            }
+            else
+            {
+                continue;
+            }
+
+            var normalizedStatus = NormalizeAgentStructuredValue(rawStatus);
+            if (string.Equals(normalizedStatus, AgentSelfReviewStatusApproved, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(normalizedStatus, AgentSelfReviewStatusRefine, StringComparison.OrdinalIgnoreCase))
+            {
+                status = normalizedStatus;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string BuildAgentVerificationOutputWithSelfReview(
+        string verificationOutput,
+        string selfReviewOutput)
+    {
+        if (string.IsNullOrWhiteSpace(selfReviewOutput))
+        {
+            return verificationOutput;
+        }
+
+        var normalizedVerificationOutput = string.IsNullOrWhiteSpace(verificationOutput)
+            ? "Sem feedback de verificacao."
+            : verificationOutput.Trim();
+
+        return
+            $"""
+            {normalizedVerificationOutput}
+
+            [AUTO-REVIEW DA PROPRIA MUDANCA]
+            {BuildPromptContextExcerpt(selfReviewOutput, "Sem feedback de auto-review.")}
+            """;
+    }
+
     private static AgentCodeChangeEvidence ParseAgentCodeChangeEvidence(string executionOutput)
     {
         if (string.IsNullOrWhiteSpace(executionOutput))
@@ -5739,6 +7208,7 @@ internal static class Program
 
         const string statusPrefix = "CODE_CHANGE_STATUS=";
         const string changeFilePrefix = "CHANGE_FILE=";
+        const string changeKindPrefix = "CHANGE_KIND=";
         const string technicalJustificationPrefix = "TECHNICAL_JUSTIFICATION=";
         const string technicalJustificationAliasPrefix = "JUSTIFICATIVA_TECNICA=";
 
@@ -5751,6 +7221,8 @@ internal static class Program
         var technicalJustificationCount = 0;
         var insideDiffFence = false;
         var containsStructuredOutput = false;
+        var changedFiles = new List<AgentCodeChangeFile>();
+        var currentChangeFileIndex = -1;
 
         foreach (var line in lines)
         {
@@ -5770,6 +7242,36 @@ internal static class Program
             {
                 changeFileCount++;
                 containsStructuredOutput = true;
+                var changedFilePath = NormalizeAgentStructuredTextValue(line[changeFilePrefix.Length..]);
+                if (string.IsNullOrWhiteSpace(changedFilePath))
+                {
+                    changedFilePath = "<nao informado>";
+                }
+
+                changedFiles.Add(new AgentCodeChangeFile(
+                    Path: changedFilePath,
+                    Kind: "unknown"));
+                currentChangeFileIndex = changedFiles.Count - 1;
+                continue;
+            }
+
+            if (line.StartsWith(changeKindPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                containsStructuredOutput = true;
+                if (currentChangeFileIndex >= 0)
+                {
+                    var changeKind = NormalizeAgentStructuredValue(line[changeKindPrefix.Length..]);
+                    if (string.IsNullOrWhiteSpace(changeKind))
+                    {
+                        changeKind = "other";
+                    }
+
+                    changedFiles[currentChangeFileIndex] = changedFiles[currentChangeFileIndex] with
+                    {
+                        Kind = changeKind
+                    };
+                }
+
                 continue;
             }
 
@@ -5812,12 +7314,29 @@ internal static class Program
             ChangeFileCount: changeFileCount,
             DiffBlockCount: diffBlockCount,
             TechnicalJustificationCount: technicalJustificationCount,
-            ContainsStructuredOutput: containsStructuredOutput);
+            ContainsStructuredOutput: containsStructuredOutput,
+            ChangedFiles: changedFiles);
     }
 
     private static string NormalizeAgentCodeChangeStatus(string rawStatus)
     {
-        var normalizedStatus = rawStatus.Trim().Trim(
+        var normalizedStatus = NormalizeAgentStructuredValue(rawStatus);
+        if (string.Equals(normalizedStatus, AgentCodeChangeStatusChanged, StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentCodeChangeStatusChanged;
+        }
+
+        if (string.Equals(normalizedStatus, AgentCodeChangeStatusNoChange, StringComparison.OrdinalIgnoreCase))
+        {
+            return AgentCodeChangeStatusNoChange;
+        }
+
+        return AgentCodeChangeStatusUnknown;
+    }
+
+    private static string NormalizeAgentStructuredValue(string rawValue)
+    {
+        return rawValue.Trim().Trim(
             '"',
             '\'',
             '`',
@@ -5835,17 +7354,14 @@ internal static class Program
             '}',
             '<',
             '>');
-        if (string.Equals(normalizedStatus, AgentCodeChangeStatusChanged, StringComparison.OrdinalIgnoreCase))
-        {
-            return AgentCodeChangeStatusChanged;
-        }
+    }
 
-        if (string.Equals(normalizedStatus, AgentCodeChangeStatusNoChange, StringComparison.OrdinalIgnoreCase))
-        {
-            return AgentCodeChangeStatusNoChange;
-        }
-
-        return AgentCodeChangeStatusUnknown;
+    private static string NormalizeAgentStructuredTextValue(string rawValue)
+    {
+        return rawValue
+            .Trim()
+            .Trim('"', '\'', '`')
+            .Trim();
     }
 
     private static string BuildAgentCodeChangeEvidenceSummary(AgentCodeChangeEvidence evidence)
@@ -5907,6 +7423,175 @@ internal static class Program
         return builder.ToString().TrimEnd();
     }
 
+    private static string BuildAgentDeliverySummary(
+        string latestExecutionOutput,
+        AgentValidationReport validationReport,
+        string verificationOutput)
+    {
+        var deliveryEvidence = ParseAgentCodeChangeEvidence(latestExecutionOutput);
+        var builder = new StringBuilder();
+
+        builder.AppendLine("[RESUMO FINAL DE ENTREGA]");
+        builder.AppendLine("Arquivos alterados:");
+        AppendAgentDeliveryChangedFiles(builder, deliveryEvidence);
+
+        builder.AppendLine();
+        builder.AppendLine("Validacoes:");
+        AppendAgentDeliveryValidationResults(builder, validationReport);
+
+        builder.AppendLine();
+        builder.AppendLine("Riscos residuais:");
+        AppendAgentDeliveryExtractedItems(
+            builder,
+            ExtractAgentDeliverySummaryItems(
+                verificationOutput,
+                "RISCOS_RESIDUAIS=",
+                "RISCOS=",
+                "RISKS=",
+                "RISK=",
+                "Riscos residuais:",
+                "Risco residual:"),
+            validationReport.HasFailures
+                ? "Existem falhas de validacao automatica pendentes."
+                : "Nenhum risco residual declarado na fase verify.");
+
+        builder.AppendLine();
+        builder.AppendLine("Proximos passos:");
+        AppendAgentDeliveryExtractedItems(
+            builder,
+            ExtractAgentDeliverySummaryItems(
+                verificationOutput,
+                "PROXIMOS_PASSOS=",
+                "PROXIMO_PASSO=",
+                "NEXT_STEPS=",
+                "NEXT_STEP=",
+                "Proximos passos:",
+                "Proximo passo:"),
+            validationReport.HasFailures
+                ? "Corrigir as falhas de validacao antes de publicar a mudanca."
+                : "Revisar o diff final e preparar commit/release conforme o fluxo do projeto.");
+
+        return builder.ToString().TrimEnd();
+    }
+
+    private static void AppendAgentDeliveryChangedFiles(
+        StringBuilder builder,
+        AgentCodeChangeEvidence deliveryEvidence)
+    {
+        if (deliveryEvidence.ChangedFiles.Count == 0)
+        {
+            builder.AppendLine("- Nenhum arquivo alterado declarado.");
+            return;
+        }
+
+        var writtenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var changedFile in deliveryEvidence.ChangedFiles)
+        {
+            var filePath = string.IsNullOrWhiteSpace(changedFile.Path)
+                ? "<nao informado>"
+                : changedFile.Path;
+            var changeKind = string.IsNullOrWhiteSpace(changedFile.Kind)
+                ? "unknown"
+                : changedFile.Kind;
+            var itemKey = $"{filePath}|{changeKind}";
+            if (!writtenFiles.Add(itemKey))
+            {
+                continue;
+            }
+
+            builder.AppendLine($"- {filePath} ({changeKind}).");
+        }
+    }
+
+    private static void AppendAgentDeliveryValidationResults(
+        StringBuilder builder,
+        AgentValidationReport validationReport)
+    {
+        if (!validationReport.WasRequired)
+        {
+            builder.AppendLine("- Nao executada: a fase execute nao declarou bloco de mudancas validavel.");
+            return;
+        }
+
+        if (!validationReport.CommandsDiscovered)
+        {
+            builder.AppendLine("- Nao executada: nenhum comando build/test/lint foi descoberto para este workspace.");
+            return;
+        }
+
+        foreach (var result in validationReport.Results)
+        {
+            builder.AppendLine(
+                $"- {result.Name}: {(result.IsSuccess ? "passed" : "failed")} " +
+                $"(exit_code={result.ExitCode}, duracao={FormatRequiredBudgetDuration(result.Duration)}).");
+        }
+    }
+
+    private static IReadOnlyList<string> ExtractAgentDeliverySummaryItems(
+        string source,
+        params string[] prefixes)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return Array.Empty<string>();
+        }
+
+        var items = new List<string>();
+        var normalizedSource = source.Replace("\r", "\n", StringComparison.Ordinal);
+        var lines = normalizedSource.Split(
+            '\n',
+            StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var line in lines)
+        {
+            foreach (var prefix in prefixes)
+            {
+                if (!line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var item = NormalizeAgentDeliverySummaryItem(line[prefix.Length..]);
+                if (!string.IsNullOrWhiteSpace(item))
+                {
+                    items.Add(item);
+                }
+
+                break;
+            }
+        }
+
+        return items;
+    }
+
+    private static string NormalizeAgentDeliverySummaryItem(string value)
+    {
+        var normalizedValue = NormalizeAgentStructuredTextValue(value)
+            .TrimStart('-', '*')
+            .Trim();
+        return BuildPromptContextExcerpt(
+            normalizedValue,
+            string.Empty,
+            AgentDeliverySummaryItemMaxCharacters);
+    }
+
+    private static void AppendAgentDeliveryExtractedItems(
+        StringBuilder builder,
+        IReadOnlyList<string> items,
+        string fallbackItem)
+    {
+        if (items.Count == 0)
+        {
+            builder.AppendLine($"- {fallbackItem}");
+            return;
+        }
+
+        foreach (var item in items)
+        {
+            builder.AppendLine($"- {item}");
+        }
+    }
+
     private static string BuildAgentCodeChangeEvidenceLogMessage(AgentCodeChangeEvidence evidence)
     {
         if (!evidence.RequiresValidation && !evidence.DeclaredNoCodeChanges)
@@ -5934,11 +7619,17 @@ internal static class Program
     private static string BuildAgentPromptBase(
         AgentExecutionPlan executionPlan,
         AgentProjectContextSnapshot projectContext,
+        AgentAutonomyPolicy autonomyPolicy,
+        bool hasExplicitSensitiveOperationApproval,
         int iteration,
         string phase)
     {
         var projectContextSection = BuildAgentProjectContextPrompt(projectContext);
+        var autonomyPolicySection = BuildAgentAutonomyPolicyPrompt(autonomyPolicy);
+        var sensitiveApprovalSection = BuildAgentSensitiveOperationApprovalPrompt(
+            hasExplicitSensitiveOperationApproval);
         var executionPlanSection = BuildAgentExecutionPlanSection(executionPlan);
+        var qualityRubricSection = AgentTechnicalQualityRubric.Default.ToPromptSection();
 
         return
             $"""
@@ -5958,9 +7649,68 @@ internal static class Program
             [CONTEXTO DE ENGENHARIA DO PROJETO]
             {projectContextSection}
 
+            [GOVERNANCA DE AUTONOMIA]
+            {autonomyPolicySection}
+
+            [APROVACAO DE OPERACOES SENSIVEIS]
+            {sensitiveApprovalSection}
+
+            [RUBRICA DE QUALIDADE TECNICA]
+            {qualityRubricSection}
+
             [PLANO DE EXECUCAO POR ETAPAS]
             {executionPlanSection}
             """;
+    }
+
+    private static string BuildAgentSensitiveOperationApprovalPrompt(
+        bool hasExplicitSensitiveOperationApproval)
+    {
+        if (hasExplicitSensitiveOperationApproval)
+        {
+            return
+                $"""
+                - status: aprovada para esta sessao via {AgentApproveSensitiveFlag}.
+                - regra: comandos sensiveis ainda precisam obedecer politicas do workspace e declarar {ShellCommandPermissionPolicy.DestructiveApprovalArgumentName}=sim por execucao.
+                - limite: preferir alternativas nao destrutivas e registrar justificativa tecnica antes de qualquer delete, move ou rename.
+                """;
+        }
+
+        return
+            $"""
+            - status: nao aprovada para esta sessao.
+            - regra: nao use {ShellCommandPermissionPolicy.DestructiveApprovalArgumentName}=sim, nao execute comandos sensiveis e nao declare delete, move ou rename como mudanca aplicada.
+            - acao esperada: apresente comandos ou diffs destrutivos apenas como proposta para aprovacao manual.
+            """;
+    }
+
+    private static string BuildAgentAutonomyPolicyPrompt(AgentAutonomyPolicy autonomyPolicy)
+    {
+        return autonomyPolicy.Level switch
+        {
+            AgentAutonomyLevel.Assisted =>
+                """
+                - nivel: assistido
+                - modo: planejamento e orientacao com supervisao humana.
+                - permissoes: nao execute ferramentas, nao assuma aplicacao de alteracoes e apresente diffs ou comandos apenas como proposta para aprovacao manual.
+                - validacao: solicite ao usuario executar build/test/lint quando houver mudanca proposta.
+                """,
+            AgentAutonomyLevel.SemiAutonomous =>
+                """
+                - nivel: semi-autonomo
+                - modo: executar o ciclo do agente dentro dos guardrails do workspace.
+                - permissoes: pode preparar mudancas, gerar diffs e executar validacoes automaticas nao destrutivas.
+                - validacao: comandos sensiveis, destrutivos ou fora das politicas do workspace exigem aprovacao explicita.
+                """,
+            AgentAutonomyLevel.Autonomous =>
+                """
+                - nivel: autonomo
+                - modo: executar plan -> execute -> verify -> refine ate concluir ou atingir limite de seguranca.
+                - permissoes: pode executar validacoes automaticas e auto-correcao dentro do orcamento da sessao.
+                - validacao: politicas de shell, arquivo, aprovacao destrutiva e auditoria continuam obrigatorias.
+                """,
+            _ => throw new ArgumentOutOfRangeException(nameof(autonomyPolicy), autonomyPolicy.Level, "Nivel de autonomia invalido.")
+        };
     }
 
     private static string BuildPromptContextExcerpt(string value, string fallbackValue)
@@ -7160,25 +8910,35 @@ internal static class Program
         bool WasCancelled,
         PromptStreamMetrics StreamMetrics);
 
+    private readonly record struct AgentCodeChangeFile(
+        string Path,
+        string Kind);
+
     private readonly record struct AgentCodeChangeEvidence(
         string Status,
         int ChangeFileCount,
         int DiffBlockCount,
         int TechnicalJustificationCount,
-        bool ContainsStructuredOutput)
+        bool ContainsStructuredOutput,
+        IReadOnlyList<AgentCodeChangeFile> ChangedFiles)
     {
         public static AgentCodeChangeEvidence Empty => new(
             Status: AgentCodeChangeStatusUnknown,
             ChangeFileCount: 0,
             DiffBlockCount: 0,
             TechnicalJustificationCount: 0,
-            ContainsStructuredOutput: false);
+            ContainsStructuredOutput: false,
+            ChangedFiles: Array.Empty<AgentCodeChangeFile>());
 
         public bool HasDeclaredCodeChanges =>
             string.Equals(Status, AgentCodeChangeStatusChanged, StringComparison.OrdinalIgnoreCase);
 
         public bool DeclaredNoCodeChanges =>
             string.Equals(Status, AgentCodeChangeStatusNoChange, StringComparison.OrdinalIgnoreCase);
+
+        public bool HasDestructiveChanges =>
+            ChangedFiles is not null
+            && ChangedFiles.Any(static file => IsDestructiveChangeKind(file.Kind));
 
         public bool RequiresValidation =>
             HasDeclaredCodeChanges
@@ -7206,6 +8966,37 @@ internal static class Program
                     && DiffBlockCount >= ChangeFileCount
                     && TechnicalJustificationCount >= ChangeFileCount;
             }
+        }
+
+        public static bool IsDestructiveChangeKind(string kind)
+        {
+            if (string.IsNullOrWhiteSpace(kind))
+            {
+                return false;
+            }
+
+            var normalizedKind = kind.Trim().Trim(
+                '"',
+                '\'',
+                '`',
+                '.',
+                ',',
+                ';',
+                ':',
+                '!',
+                '?',
+                '(',
+                ')',
+                '[',
+                ']',
+                '{',
+                '}',
+                '<',
+                '>');
+            return normalizedKind.Equals("delete", StringComparison.OrdinalIgnoreCase)
+                || normalizedKind.Equals("remove", StringComparison.OrdinalIgnoreCase)
+                || normalizedKind.Equals("move", StringComparison.OrdinalIgnoreCase)
+                || normalizedKind.Equals("rename", StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -7394,6 +9185,30 @@ internal static class Program
         }
     }
 
+    private readonly record struct AgentSelfReviewDecision(
+        bool IsApproved,
+        string Status)
+    {
+        public static AgentSelfReviewDecision Approved(string status)
+        {
+            return new AgentSelfReviewDecision(IsApproved: true, Status: status);
+        }
+
+        public static AgentSelfReviewDecision NeedsRefine(string status)
+        {
+            return new AgentSelfReviewDecision(IsApproved: false, Status: status);
+        }
+    }
+
+    private readonly record struct AgentAuditContext(
+        string SessionId,
+        string Objective,
+        string? Model,
+        string WorkspaceRootDirectory,
+        string AutonomyLevel,
+        bool HasExplicitSensitiveOperationApproval,
+        Func<AgentAuditEntry, string> AgentAuditAppender);
+
     private sealed class WorkspacePatchRequestDocument
     {
         public WorkspacePatchChangeDocument[]? Changes { get; init; }
@@ -7474,5 +9289,8 @@ internal static class Program
         string? AgentObjective = null,
         int? AgentMaxSteps = null,
         TimeSpan? AgentMaxTime = null,
-        decimal? AgentMaxCost = null);
+        decimal? AgentMaxCost = null,
+        bool RunAgentBenchmark = false,
+        decimal? AgentBenchmarkMinimumSuccessRate = null,
+        bool AgentSensitiveOperationsApproved = false);
 }

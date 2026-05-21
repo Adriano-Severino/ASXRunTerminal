@@ -39,6 +39,38 @@ public sealed class AgentValidationCommandCatalogTests
     }
 
     [Fact]
+    public void Discover_WhenDotNetCoverageCollectorExists_CollectsCoverageOnTestCommand()
+    {
+        var directoryPath = CreateTemporaryDirectory();
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(directoryPath, "tests"));
+            File.WriteAllText(Path.Combine(directoryPath, "Sample.slnx"), string.Empty);
+            File.WriteAllText(
+                Path.Combine(directoryPath, "tests", "Sample.Tests.csproj"),
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <ItemGroup>
+                    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+                  </ItemGroup>
+                </Project>
+                """);
+
+            var commands = AgentValidationCommandCatalog.Discover(directoryPath);
+
+            var testCommand = Assert.Single(
+                commands,
+                static command => string.Equals(command.Name, "test", StringComparison.Ordinal));
+            Assert.Contains("dotnet test Sample.slnx --nologo", testCommand.CommandLine);
+            Assert.Contains("--collect \"XPlat Code Coverage\"", testCommand.CommandLine);
+        }
+        finally
+        {
+            Directory.Delete(directoryPath, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Discover_WhenNoKnownProjectFilesExist_ReturnsEmpty()
     {
         var directoryPath = CreateTemporaryDirectory();

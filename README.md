@@ -249,6 +249,68 @@ Regras:
 - comandos desbloqueados via `allow` exigem aprovacao explicita por execucao (`destructive_approval=sim`).
 - comando bloqueado retorna `exit code 126`.
 
+### Governanca do modo agente por projeto
+
+O modo `agent` pode ser limitado por workspace com o arquivo:
+
+- `<raiz-do-workspace>/.asxrun/agent-governance.json`
+
+Quando esse arquivo nao existe, o nivel padrao e `autonomo` para preservar o
+comportamento atual do agente.
+
+```json
+{
+  "autonomyLevel": "semi-autonomo"
+}
+```
+
+Niveis suportados:
+
+- `assistido`: o agente atua como planejador/revisor, nao executa validacoes automaticas e deve propor diffs/comandos para aprovacao manual.
+- `semi-autonomo`: o agente pode executar o ciclo com diffs e validacoes automaticas nao destrutivas, mantendo aprovacao explicita para comandos sensiveis; auto-correcao fica reservada ao nivel `autonomo`.
+- `autonomo`: o agente executa `plan -> execute -> verify -> refine`, validacoes e auto-correcao dentro do orcamento e dos guardrails configurados.
+
+Operacoes destrutivas ou sensiveis no modo `agent` exigem aprovacao explicita por
+sessao:
+
+```bash
+asxrun agent --approve-sensitive "Remover codigo legado com validacao completa."
+```
+
+Sem essa flag, o agente bloqueia `destructive_approval=sim` em tool calls e trata
+mudancas declaradas como `delete`, `move` ou `rename` como falha de governanca.
+Mesmo com a flag, comandos de shell sensiveis ainda precisam obedecer
+`.asxrun/shell-command-policy.json` e declarar `destructive_approval=sim` por
+execucao.
+
+### Auditoria detalhada do modo agente
+
+Cada execucao de `asxrun agent` registra eventos locais em JSON Lines:
+
+- Windows: `%USERPROFILE%\.asxrun\agent-audit`
+- Linux/macOS: `~/.asxrun/agent-audit`
+
+A trilha inclui `sessionId`, sequencia por evento, objetivo, workspace, nivel de
+autonomia, status de aprovacao sensivel, decisoes do ciclo (`plan`, `verify`,
+`refine`), comandos automaticos de validacao (`build`, `test`, `lint`) com
+`exitCode`/duracao e mudancas declaradas na fase `execute`/`auto-correct`
+(`CHANGE_FILE`, `CHANGE_KIND` e indicador destrutivo).
+
+### Benchmark de sucesso do modo agente
+
+O comando `agent benchmark` calcula a taxa de tarefas concluidas pelo agente sem
+intervencao humana, usando a trilha local `agent-audit` como fonte.
+
+```bash
+asxrun agent benchmark
+asxrun agent benchmark --min-success-rate 70
+```
+
+A metrica principal e `taxa_sucesso_autonomo`: sessoes `agent` concluidas sem
+aprovacao sensivel explicita, retomada manual, modo assistido, cancelamento ou
+eventos de aprovacao/validacao manual. Quando `--min-success-rate` e informado,
+o comando retorna erro se a taxa ficar abaixo do minimo.
+
 ### Prompt unico
 
 ```bash
@@ -271,6 +333,9 @@ O comando decompoe o objetivo automaticamente em um plano de execucao por etapas
 e executa o loop autonomo `plan -> execute -> verify -> refine` ate concluir
 ou atingir o limite interno de seguranca.
 
+Antes de iniciar o ciclo, o agente carrega a governanca do projeto em
+`.asxrun/agent-governance.json` e injeta o nivel de autonomia ativo no prompt.
+
 Na fase `execute`, quando houver alteracao de codigo, o agente exige rastreabilidade
 por mudanca com:
 
@@ -281,6 +346,22 @@ por mudanca com:
 
 Se o `verify` receber resposta `done` sem diff e justificativa por mudanca declarada,
 o loop forca `refine` automaticamente.
+
+Antes de finalizar uma iteracao com mudancas declaradas, o agente executa uma fase
+`auto-review` da propria mudanca. Essa fase deve retornar
+`SELF_REVIEW_STATUS=<approved|refine>`; qualquer lacuna material bloqueia a conclusao
+e direciona o proximo `refine`.
+
+O agente tambem captura um estado estavel do workspace antes do loop e atualiza esse
+estado sempre que a validacao automatica pos-mudanca passa. Se uma execucao degradar
+o projeto e `build`/`test`/`lint` falharem, o CLI restaura automaticamente o ultimo
+estado estavel antes de seguir para `verify`/`refine`, registrando o rollback na
+auditoria do agente.
+
+Quando houver metricas de cobertura disponiveis, o modo `agent` aplica um gate de
+cobertura linear minima de 80%. Se a cobertura reportada ficar abaixo desse limite,
+a validacao recebe o resultado `coverage: failed` e uma resposta `VERIFICATION_STATUS=done`
+e bloqueada automaticamente para `refine`.
 
 Opcionalmente, use modelo explicito:
 
@@ -297,6 +378,8 @@ asxrun agent --max-steps 6 --max-time 300 --max-cost 20000 "Planejar e executar 
 - `--max-steps`: limite de iteracoes do loop autonomo.
 - `--max-time`: limite de tempo total da sessao (`segundos` ou formato `hh:mm:ss`).
 - `--max-cost`: limite de custo estimado em caracteres acumulados (`prompt + resposta`).
+- `--approve-sensitive`: aprova explicitamente operacoes destrutivas/sensiveis
+  nesta sessao do agente, mantendo os guardrails de shell por execucao.
 
 ### Modo interativo
 
@@ -340,8 +423,8 @@ asxrun ask "Resumo do arquivo Program.cs"
 
 Arquivos locais criados automaticamente:
 
-- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history`, `%USERPROFILE%\\.asxrun\\mcp-servers.json`, `%USERPROFILE%\\.asxrun\\patch-audit` e `%USERPROFILE%\\.asxrun\\execution-checkpoints`
-- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history`, `~/.asxrun/mcp-servers.json`, `~/.asxrun/patch-audit` e `~/.asxrun/execution-checkpoints`
+- Windows: `%USERPROFILE%\\.asxrun\\config`, `%USERPROFILE%\\.asxrun\\history`, `%USERPROFILE%\\.asxrun\\mcp-servers.json`, `%USERPROFILE%\\.asxrun\\patch-audit`, `%USERPROFILE%\\.asxrun\\agent-audit` e `%USERPROFILE%\\.asxrun\\execution-checkpoints`
+- Linux/macOS: `~/.asxrun/config`, `~/.asxrun/history`, `~/.asxrun/mcp-servers.json`, `~/.asxrun/patch-audit`, `~/.asxrun/agent-audit` e `~/.asxrun/execution-checkpoints`
 
 Chaves suportadas:
 
@@ -497,6 +580,19 @@ dotnet test ASXRunTerminal.slnx -c Debug
 - sempre adicionar/atualizar testes para comportamentos alterados;
 - manter tratamento de erro com mensagens acionaveis;
 - para mapeamentos de modelos internos, preferir `implicit operator` em vez de AutoMapper.
+
+### Rubrica de Qualidade Tecnica do Agente
+
+O modo `agent` usa uma rubrica obrigatoria em todas as fases (`plan`, `execute`,
+`verify`, `auto-review`, `refine`). Se qualquer dimensao ficar sem evidencia
+suficiente, a fase `verify` deve marcar `VERIFICATION_STATUS=refine` ou o
+`auto-review` deve marcar `SELF_REVIEW_STATUS=refine`.
+
+- corretude: resolver o objetivo declarado, preservar contratos existentes e tratar estados de erro conhecidos;
+- legibilidade: manter codigo simples, idiomatico, localizado e sem abstracao desnecessaria;
+- testes: cobrir comportamento alterado e falhas provaveis com validacao objetiva;
+- seguranca: preservar privacidade, permissoes, segredos e operacoes destrutivas sob guardrails;
+- performance: evitar custo computacional desnecessario e avaliar tradeoffs em fluxos criticos.
 
 ## Solucao de Problemas
 

@@ -7,6 +7,11 @@ O formato segue o Keep a Changelog e o versionamento segue Semantic Versioning.
 ## [Unreleased]
 
 ### Adicionado
+- Comando `asxrun agent benchmark` para medir a taxa de tarefas concluidas pelo agente sem intervencao humana a partir da trilha `agent-audit`.
+- Gate de cobertura minima de testes no modo `agent`, bloqueando conclusao quando a cobertura linear reportada fica abaixo de 80%.
+- Auto-review obrigatorio da propria mudanca antes da conclusao do modo `agent`, com gate `SELF_REVIEW_STATUS=<approved|refine>`.
+- Rollback automatico do modo `agent` para restaurar o ultimo estado estavel quando validacoes pos-mudanca degradam o projeto.
+- Auditoria detalhada do modo `agent` em `~/.asxrun/agent-audit`, cobrindo decisoes do ciclo, comandos automaticos e mudancas declaradas.
 - Suporte a tema configuravel via `config` com chave `theme` e valores `auto`, `light`, `dark` e `high-contrast`.
 - Comandos interativos no modo `chat`: `/help`, `/clear`, `/models`, `/tools` e `/exit`.
 - Guardrails por workspace para operacoes de arquivo via `.asxrun/workspace-permissions.json`, aplicados no comando `patch` (incluindo `--dry-run`).

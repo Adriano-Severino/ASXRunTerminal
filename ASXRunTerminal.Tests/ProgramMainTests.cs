@@ -45,7 +45,8 @@ public sealed class ProgramMainTests
         Assert.Contains("Opcoes:", result.StdOut);
         Assert.Contains("Comandos:", result.StdOut);
         Assert.Contains("ask \"prompt\"", result.StdOut);
-        Assert.Contains("asxrun agent [--model <modelo>] \"objetivo\"", result.StdOut);
+        Assert.Contains("asxrun agent [--model <modelo>] [--approve-sensitive] \"objetivo\"", result.StdOut);
+        Assert.Contains("asxrun agent benchmark [--min-success-rate <percentual>]", result.StdOut);
         Assert.Contains("asxrun chat", result.StdOut);
         Assert.Contains("asxrun doctor", result.StdOut);
         Assert.Contains("asxrun models", result.StdOut);
@@ -69,6 +70,8 @@ public sealed class ProgramMainTests
         Assert.Contains("--max-steps <n>", result.StdOut);
         Assert.Contains("--max-time <v>", result.StdOut);
         Assert.Contains("--max-cost <v>", result.StdOut);
+        Assert.Contains("--approve-sensitive", result.StdOut);
+        Assert.Contains("--min-success-rate <p>", result.StdOut);
         Assert.Contains("asxrun ask [--model <modelo>] \"prompt\"", result.StdOut);
         Assert.Contains("padrao: qwen3.5:4b", result.StdOut);
         Assert.Contains("ASXRUN_DEFAULT_MODEL=<nome>", result.StdOut);
@@ -497,7 +500,74 @@ public sealed class ProgramMainTests
         Assert.Contains("testes (", firstPlanPrompt);
         Assert.Contains("docs (", firstPlanPrompt);
         Assert.Contains("historico git recente:", firstPlanPrompt);
+        Assert.Contains("[RUBRICA DE QUALIDADE TECNICA]", firstPlanPrompt);
+        Assert.Contains("Corretude (correctness)", firstPlanPrompt);
+        Assert.Contains("Legibilidade (readability)", firstPlanPrompt);
+        Assert.Contains("Testes (tests)", firstPlanPrompt);
+        Assert.Contains("Seguranca (security)", firstPlanPrompt);
+        Assert.Contains("Performance (performance)", firstPlanPrompt);
         Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithProjectAutonomyPolicy_InjectsConfiguredGovernance()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var policyDirectory = Path.Combine(workspaceRootDirectory, UserConfigFile.ConfigDirectoryName);
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var capturedPrompts = new List<string>();
+
+        try
+        {
+            Directory.CreateDirectory(nestedDirectory);
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(policyDirectory);
+            File.WriteAllText(Path.Combine(workspaceRootDirectory, "README.md"), "# workspace");
+            File.WriteAllText(
+                Path.Combine(policyDirectory, AgentAutonomyPolicyFile.AgentAutonomyPolicyFileName),
+                """
+                {
+                  "autonomyLevel": "assistido"
+                }
+                """);
+
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMainWithModelAwareStreamingExecutor(
+                (prompt, _, _) =>
+                {
+                    capturedPrompts.Add(prompt);
+                    var response = prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                        ? "VERIFICATION_STATUS=done\nSem alteracoes aplicadas."
+                        : "ok";
+                    return StreamSingleChunk(response);
+                },
+                "agent",
+                "avaliar",
+                "mudanca");
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Contains("[INFO] Nivel de autonomia do projeto: assistido.", result.StdOut);
+
+            var firstPlanPrompt = Assert.Single(
+                capturedPrompts,
+                static prompt =>
+                    prompt.Contains("Iteracao: 1", StringComparison.Ordinal)
+                    && prompt.Contains("Fase atual: plan", StringComparison.Ordinal));
+            Assert.Contains("[GOVERNANCA DE AUTONOMIA]", firstPlanPrompt);
+            Assert.Contains("- nivel: assistido", firstPlanPrompt);
+            Assert.Contains("aprovacao manual", firstPlanPrompt);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
     }
 
     [Fact]
@@ -536,6 +606,247 @@ public sealed class ProgramMainTests
     }
 
     [Fact]
+    public void Main_AgentCommand_WithAssistedAutonomy_BlocksAutomaticValidation()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var nestedDirectory = Path.Combine(workspaceRootDirectory, "src", "app");
+        var policyDirectory = Path.Combine(workspaceRootDirectory, UserConfigFile.ConfigDirectoryName);
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            validationScripts.Add(request.Arguments["script"]);
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5));
+        });
+
+        try
+        {
+            Directory.CreateDirectory(nestedDirectory);
+            Directory.CreateDirectory(Path.Combine(workspaceRootDirectory, ".git"));
+            Directory.CreateDirectory(policyDirectory);
+            File.WriteAllText(Path.Combine(workspaceRootDirectory, "ASXRunTerminal.slnx"), string.Empty);
+            File.WriteAllText(
+                Path.Combine(policyDirectory, AgentAutonomyPolicyFile.AgentAutonomyPolicyFileName),
+                """
+                {
+                  "autonomyLevel": "assistido"
+                }
+                """);
+
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(nestedDirectory);
+
+            var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+                static (prompt, _, _) =>
+                {
+                    if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk(
+                            """
+                            CODE_CHANGE_STATUS=changed
+                            CHANGE_FILE=ASXRunTerminal/Program.cs
+                            CHANGE_KIND=edit
+                            ```diff
+                            @@ -1 +1 @@
+                            -old
+                            +new
+                            ```
+                            TECHNICAL_JUSTIFICATION=Propoe ajuste sob supervisao.
+                            """);
+                    }
+
+                    if (IsAgentAutoReviewPrompt(prompt))
+                    {
+                        return StreamApprovedAgentSelfReview();
+                    }
+
+                    if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao manual pendente.");
+                    }
+
+                    return StreamSingleChunk("ok");
+                },
+                toolRuntime,
+                "agent",
+                "propor",
+                "ajuste");
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Empty(validationScripts);
+            Assert.Contains(
+                "Validacao automatica pos-mudanca bloqueada pelo nivel de autonomia 'assistido'.",
+                result.StdOut);
+            Assert.Equal(string.Empty, result.StdErr);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenDestructiveChangeHasNoExplicitApproval_BlocksBeforeValidation()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var capturedPrompts = new List<string>();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            validationScripts.Add(request.Arguments["script"]);
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5));
+        });
+
+        try
+        {
+            Directory.CreateDirectory(workspaceRootDirectory);
+            File.WriteAllText(Path.Combine(workspaceRootDirectory, "ASXRunTerminal.slnx"), string.Empty);
+
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(workspaceRootDirectory);
+
+            var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+                (prompt, _, _) =>
+                {
+                    capturedPrompts.Add(prompt);
+
+                    if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk(
+                            """
+                            CODE_CHANGE_STATUS=changed
+                            CHANGE_FILE=src/LegacyFeature.cs
+                            CHANGE_KIND=delete
+                            ```diff
+                            @@ -1 +0,0 @@
+                            -legacy
+                            ```
+                            TECHNICAL_JUSTIFICATION=Remove codigo legado.
+                            """);
+                    }
+
+                    if (IsAgentAutoReviewPrompt(prompt))
+                    {
+                        return StreamApprovedAgentSelfReview();
+                    }
+
+                    if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                    }
+
+                    return StreamSingleChunk("ok");
+                },
+                toolRuntime,
+                "agent",
+                "--max-steps",
+                "1",
+                "remover",
+                "codigo",
+                "legado");
+
+            Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+            Assert.Empty(validationScripts);
+            Assert.Contains("Aprovacao explicita para operacoes sensiveis/destrutivas no modo agente: nao habilitada.", result.StdOut);
+            Assert.Contains("Operacao destrutiva declarada na fase execute sem aprovacao explicita", result.StdOut);
+            Assert.Contains("Validacao automatica 'governance' falhou", result.StdOut);
+            Assert.Contains(
+                "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.",
+                result.StdOut);
+
+            var verifyPrompt = Assert.Single(
+                capturedPrompts,
+                static prompt => prompt.Contains("Fase atual: verify", StringComparison.Ordinal));
+            Assert.Contains("- governance: failed", verifyPrompt);
+            Assert.Contains("--approve-sensitive", verifyPrompt);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WithExplicitSensitiveApproval_AllowsDestructiveChangeValidation()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            validationScripts.Add(request.Arguments["script"]);
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5));
+        });
+
+        try
+        {
+            Directory.CreateDirectory(workspaceRootDirectory);
+            File.WriteAllText(Path.Combine(workspaceRootDirectory, "ASXRunTerminal.slnx"), string.Empty);
+
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(workspaceRootDirectory);
+
+            var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+                static (prompt, _, _) =>
+                {
+                    if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk(
+                            """
+                            CODE_CHANGE_STATUS=changed
+                            CHANGE_FILE=src/LegacyFeature.cs
+                            CHANGE_KIND=delete
+                            ```diff
+                            @@ -1 +0,0 @@
+                            -legacy
+                            ```
+                            TECHNICAL_JUSTIFICATION=Remove codigo legado aprovado na sessao.
+                            """);
+                    }
+
+                    if (IsAgentAutoReviewPrompt(prompt))
+                    {
+                        return StreamApprovedAgentSelfReview();
+                    }
+
+                    if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                    }
+
+                    return StreamSingleChunk("ok");
+                },
+                toolRuntime,
+                "agent",
+                "--approve-sensitive",
+                "remover",
+                "codigo",
+                "legado");
+
+            Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+            Assert.Equal(3, validationScripts.Count);
+            Assert.Contains("Aprovacao explicita para operacoes sensiveis/destrutivas no modo agente: habilitada.", result.StdOut);
+            Assert.Contains("Validacao automatica 'build' passou", result.StdOut);
+            Assert.Contains("Validacao automatica 'test' passou", result.StdOut);
+            Assert.Contains("Validacao automatica 'lint' passou", result.StdOut);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Main_AgentCommand_AfterChangedBlock_RunsBuildTestLintBeforeVerify()
     {
         var capturedPrompts = new List<string>();
@@ -567,6 +878,11 @@ public sealed class ProgramMainTests
                         """);
                 }
 
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
+                }
+
                 if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
                 {
                     return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
@@ -593,10 +909,390 @@ public sealed class ProgramMainTests
             capturedPrompts,
             static prompt => prompt.Contains("Fase atual: verify", StringComparison.Ordinal));
         Assert.Contains("[VALIDACAO AUTOMATICA POS-MUDANCA]", verifyPrompt);
+        Assert.Contains("RISCOS_RESIDUAIS=<nenhum|descricao curta dos riscos residuais>", verifyPrompt);
+        Assert.Contains("PROXIMOS_PASSOS=<nenhum|proximo passo objetivo>", verifyPrompt);
         Assert.Contains("Status geral: passed.", verifyPrompt);
         Assert.Contains("- build: passed", verifyPrompt);
         Assert.Contains("- test: passed", verifyPrompt);
         Assert.Contains("- lint: passed", verifyPrompt);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_AfterVerifyDoneForChangedBlock_RunsAutoReviewBeforeConclusion()
+    {
+        var capturedPrompts = new List<string>();
+        var toolRuntime = new StubToolRuntime(static (_, _) =>
+            ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5)));
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Adiciona gate de auto-review.
+                        """);
+                }
+
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        VERIFICATION_STATUS=done
+                        RISCOS_RESIDUAIS=nenhum
+                        PROXIMOS_PASSOS=nenhum
+                        """);
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "implementar",
+            "auto-review");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        var autoReviewPrompt = Assert.Single(
+            capturedPrompts,
+            static prompt => prompt.Contains("Fase atual: auto-review", StringComparison.Ordinal));
+        Assert.Contains("[TAREFA DA FASE AUTO-REVIEW]", autoReviewPrompt);
+        Assert.Contains("SELF_REVIEW_STATUS=<approved|refine>", autoReviewPrompt);
+        Assert.Contains("[DECISAO DA FASE VERIFY]", autoReviewPrompt);
+        Assert.Contains("Status geral: passed.", autoReviewPrompt);
+        Assert.Contains("Auto-review aprovou a propria mudanca antes da conclusao.", result.StdOut);
+        Assert.Contains("[RESUMO FINAL DE ENTREGA]", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenAutoReviewRequestsRefine_RunsRefineBeforeConclusion()
+    {
+        var capturedPrompts = new List<string>();
+        var toolRuntime = new StubToolRuntime(static (_, _) =>
+            ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5)));
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            (prompt, _, _) =>
+            {
+                capturedPrompts.Add(prompt);
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 1", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Adiciona comportamento que exige revisao.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                    && prompt.Contains("Iteracao: 2", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=no-change
+                        Lacuna do auto-review reavaliada sem nova mudanca.
+                        """);
+                }
+
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamSingleChunk(
+                        """
+                        SELF_REVIEW_STATUS=refine
+                        SELF_REVIEW_FINDINGS=Falta teste cobrindo caminho de erro.
+                        """);
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "--max-steps",
+            "2",
+            "implementar",
+            "auto-review",
+            "com",
+            "refine");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains(
+            "Auto-review marcou status 'refine'. Iniciando fase refine.",
+            result.StdOut);
+        Assert.Contains(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Fase atual: refine", StringComparison.Ordinal)
+                && prompt.Contains("Falta teste cobrindo caminho de erro", StringComparison.Ordinal));
+        Assert.Contains(
+            capturedPrompts,
+            static prompt =>
+                prompt.Contains("Iteracao: 2", StringComparison.Ordinal)
+                && prompt.Contains("Fase atual: plan", StringComparison.Ordinal));
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WritesDetailedAuditTrailForDecisionCommandAndChange()
+    {
+        var auditEntries = new List<AgentAuditEntry>();
+        var toolRuntime = new StubToolRuntime(static (_, _) =>
+            ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5)));
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorToolRuntimeAndAgentAudit(
+            static (prompt, _, _) =>
+            {
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Ajusta fluxo auditavel do agente.
+                        """);
+                }
+
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            entry =>
+            {
+                auditEntries.Add(entry);
+                return "C:/audit/agent-audit";
+            },
+            "agent",
+            "implementar",
+            "auditoria",
+            "detalhada");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Trilha de auditoria do agente: C:/audit/agent-audit", result.StdOut);
+        Assert.NotEmpty(auditEntries);
+        Assert.All(auditEntries, static entry => Assert.Equal("agent", entry.Command));
+        Assert.All(auditEntries, static entry => Assert.Equal("implementar auditoria detalhada", entry.Objective));
+        Assert.Single(auditEntries.Select(static entry => entry.SessionId).Distinct(StringComparer.OrdinalIgnoreCase));
+
+        Assert.Contains(
+            auditEntries,
+            static entry =>
+                string.Equals(entry.EventType, "decision", StringComparison.Ordinal)
+                && string.Equals(entry.Phase, "plan", StringComparison.Ordinal)
+                && string.Equals(entry.Status, "completed", StringComparison.Ordinal));
+
+        var changeEntry = Assert.Single(
+            auditEntries,
+            static entry =>
+                string.Equals(entry.EventType, "change", StringComparison.Ordinal)
+                && string.Equals(entry.Phase, "execute", StringComparison.Ordinal));
+        Assert.Equal("changed", changeEntry.Status);
+        Assert.Single(changeEntry.Changes);
+        Assert.Equal("ASXRunTerminal/Program.cs", changeEntry.Changes[0].Path);
+        Assert.Equal("edit", changeEntry.Changes[0].Kind);
+        Assert.False(changeEntry.Changes[0].IsDestructive);
+
+        var commandEntries = auditEntries
+            .Where(static entry => string.Equals(entry.EventType, "command", StringComparison.Ordinal))
+            .ToArray();
+        Assert.Equal(3, commandEntries.Length);
+        Assert.Contains(commandEntries, static entry => entry.CommandLine?.Contains("dotnet build", StringComparison.OrdinalIgnoreCase) == true);
+        Assert.Contains(commandEntries, static entry => entry.CommandLine?.Contains("dotnet test", StringComparison.OrdinalIgnoreCase) == true);
+        Assert.Contains(commandEntries, static entry => entry.CommandLine?.Contains("dotnet format", StringComparison.OrdinalIgnoreCase) == true);
+        Assert.All(commandEntries, static entry =>
+        {
+            Assert.Equal("shell", entry.ToolName);
+            Assert.Equal(0, entry.ExitCode);
+            Assert.True(entry.IsSuccess);
+            Assert.Equal("passed", entry.Status);
+        });
+
+        Assert.Contains(
+            auditEntries,
+            static entry =>
+                string.Equals(entry.EventType, "decision", StringComparison.Ordinal)
+                && string.Equals(entry.Phase, "verify", StringComparison.Ordinal)
+                && string.Equals(entry.Status, "done", StringComparison.Ordinal));
+        Assert.Contains(
+            auditEntries,
+            static entry =>
+                string.Equals(entry.EventType, "decision", StringComparison.Ordinal)
+                && string.Equals(entry.Phase, "auto-review", StringComparison.Ordinal)
+                && string.Equals(entry.Status, "approved", StringComparison.Ordinal));
+        Assert.Contains(
+            auditEntries,
+            static entry =>
+                string.Equals(entry.EventType, "decision", StringComparison.Ordinal)
+                && string.Equals(entry.Phase, "session", StringComparison.Ordinal)
+                && string.Equals(entry.Status, "completed", StringComparison.Ordinal));
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentBenchmarkCommand_WithAuditEntries_WritesAutonomousSuccessRate()
+    {
+        IReadOnlyList<AgentAuditEntry> auditEntries =
+        [
+            CreateAgentBenchmarkAuditEntry(
+                sessionId: "session-autonomous",
+                sessionSequence: 1,
+                timestampUtc: new DateTimeOffset(2026, 4, 29, 10, 0, 0, TimeSpan.Zero),
+                phase: "session",
+                eventType: "lifecycle",
+                status: "started"),
+            CreateAgentBenchmarkAuditEntry(
+                sessionId: "session-autonomous",
+                sessionSequence: 2,
+                timestampUtc: new DateTimeOffset(2026, 4, 29, 10, 1, 0, TimeSpan.Zero),
+                iteration: 1,
+                phase: "session",
+                eventType: "decision",
+                status: "completed"),
+            CreateAgentBenchmarkAuditEntry(
+                sessionId: "session-approved",
+                sessionSequence: 3,
+                timestampUtc: new DateTimeOffset(2026, 4, 29, 11, 0, 0, TimeSpan.Zero),
+                phase: "session",
+                eventType: "lifecycle",
+                status: "started",
+                hasExplicitSensitiveOperationApproval: true),
+            CreateAgentBenchmarkAuditEntry(
+                sessionId: "session-approved",
+                sessionSequence: 4,
+                timestampUtc: new DateTimeOffset(2026, 4, 29, 11, 1, 0, TimeSpan.Zero),
+                iteration: 1,
+                phase: "session",
+                eventType: "decision",
+                status: "completed",
+                hasExplicitSensitiveOperationApproval: true)
+        ];
+
+        var result = ExecuteMainWithAgentAuditLoader(
+            () => auditEntries,
+            "agent",
+            "benchmark",
+            "--min-success-rate",
+            "50");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[INFO] Benchmark de sucesso do modo agente autonomo.", result.StdOut);
+        Assert.Contains("sessoes=2", result.StdOut);
+        Assert.Contains("concluidas=2", result.StdOut);
+        Assert.Contains("autonomas_sem_intervencao=1", result.StdOut);
+        Assert.Contains("com_intervencao=1", result.StdOut);
+        Assert.Contains("taxa_sucesso_autonomo=50.00%", result.StdOut);
+        Assert.Contains("minimo=50.00%", result.StdOut);
+        Assert.Contains("status=passed", result.StdOut);
+        Assert.Contains("- session=session-autonomous; status=completed", result.StdOut);
+        Assert.Contains("intervencao=nao", result.StdOut);
+        Assert.Contains("intervencao=aprovacao sensivel/destrutiva explicita", result.StdOut);
+        Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenObjectiveConcludes_WritesFinalDeliverySummary()
+    {
+        var toolRuntime = new StubToolRuntime(static (_, _) =>
+            ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(5)));
+
+        var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+            static (prompt, _, _) =>
+            {
+                if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        CODE_CHANGE_STATUS=changed
+                        CHANGE_FILE=ASXRunTerminal/Program.cs
+                        CHANGE_KIND=edit
+                        ```diff
+                        @@ -1 +1 @@
+                        -old
+                        +new
+                        ```
+                        TECHNICAL_JUSTIFICATION=Adiciona resumo final de entrega.
+                        """);
+                }
+
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
+                }
+
+                if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                {
+                    return StreamSingleChunk(
+                        """
+                        VERIFICATION_STATUS=done
+                        RISCOS_RESIDUAIS=Depende de revisao manual do diff antes do merge.
+                        PROXIMOS_PASSOS=Abrir PR com a validacao executada.
+                        """);
+                }
+
+                return StreamSingleChunk("ok");
+            },
+            toolRuntime,
+            "agent",
+            "gerar",
+            "resumo",
+            "final");
+
+        Assert.Equal((int)CliExitCode.Success, result.ExitCode);
+        Assert.Contains("[RESUMO FINAL DE ENTREGA]", result.StdOut);
+        Assert.Contains("Arquivos alterados:", result.StdOut);
+        Assert.Contains("- ASXRunTerminal/Program.cs (edit).", result.StdOut);
+        Assert.Contains("Validacoes:", result.StdOut);
+        Assert.Contains("- build: passed", result.StdOut);
+        Assert.Contains("- test: passed", result.StdOut);
+        Assert.Contains("- lint: passed", result.StdOut);
+        Assert.Contains("Riscos residuais:", result.StdOut);
+        Assert.Contains("- Depende de revisao manual do diff antes do merge.", result.StdOut);
+        Assert.Contains("Proximos passos:", result.StdOut);
+        Assert.Contains("- Abrir PR com a validacao executada.", result.StdOut);
         Assert.Equal(string.Empty, result.StdErr);
     }
 
@@ -654,6 +1350,11 @@ public sealed class ProgramMainTests
                         """);
                 }
 
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
+                }
+
                 if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
                 {
                     return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
@@ -691,6 +1392,103 @@ public sealed class ProgramMainTests
         Assert.Contains("stdout: falha em AgentTests", firstVerifyPrompt);
         Assert.Contains("stderr: teste quebrado", firstVerifyPrompt);
         Assert.Equal(string.Empty, result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenMinimumCoverageIsNotMet_BlocksConclusion()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var governanceDirectory = Path.Combine(temporaryDirectory, UserConfigFile.ConfigDirectoryName);
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var capturedPrompts = new List<string>();
+        var validationScripts = new List<string>();
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            var script = request.Arguments["script"];
+            validationScripts.Add(script);
+
+            if (script.Contains("dotnet test", StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolExecutionResult.Success(
+                    output: "Line coverage: 72.50%",
+                    duration: TimeSpan.FromMilliseconds(4));
+            }
+
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(4));
+        });
+
+        try
+        {
+            Directory.CreateDirectory(governanceDirectory);
+            File.WriteAllText(Path.Combine(temporaryDirectory, "Sample.slnx"), string.Empty);
+            File.WriteAllText(
+                Path.Combine(governanceDirectory, AgentAutonomyPolicyFile.AgentAutonomyPolicyFileName),
+                """
+                {
+                  "autonomyLevel": "semi-autonomo"
+                }
+                """);
+
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(temporaryDirectory);
+
+            var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+                (prompt, _, _) =>
+                {
+                    capturedPrompts.Add(prompt);
+
+                    if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk(
+                            """
+                            CODE_CHANGE_STATUS=changed
+                            CHANGE_FILE=src/CoverageGate.cs
+                            CHANGE_KIND=edit
+                            ```diff
+                            @@ -1 +1 @@
+                            -old
+                            +new
+                            ```
+                            TECHNICAL_JUSTIFICATION=Adiciona comportamento que exige cobertura minima.
+                            """);
+                    }
+
+                    if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                    }
+
+                    return StreamSingleChunk("ok");
+                },
+                toolRuntime,
+                "agent",
+                "--max-steps",
+                "1",
+                "aumentar",
+                "cobertura");
+
+            Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+            Assert.Equal(3, validationScripts.Count);
+            Assert.Contains("Validacao automatica 'coverage' falhou", result.StdOut);
+            Assert.Contains("Cobertura minima de testes nao atendida", result.StdOut);
+            Assert.Contains(
+                "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.",
+                result.StdOut);
+
+            var verifyPrompt = Assert.Single(
+                capturedPrompts,
+                static prompt => prompt.Contains("Fase atual: verify", StringComparison.Ordinal));
+            Assert.Contains("Status geral: failed.", verifyPrompt);
+            Assert.Contains("- coverage: failed", verifyPrompt);
+            Assert.Contains("cobertura_linear=72.50%", verifyPrompt);
+            Assert.Contains("minimo=80.00%", verifyPrompt);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
     }
 
     [Fact]
@@ -757,6 +1555,11 @@ public sealed class ProgramMainTests
                         """);
                 }
 
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
+                }
+
                 if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
                 {
                     return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
@@ -774,7 +1577,7 @@ public sealed class ProgramMainTests
         Assert.Equal(6, validationScripts.Count);
         Assert.Equal(2, testRunCount);
         Assert.Contains(
-            "Auto-correcao de validacao: tentativa 1/2 apos falha em build/test/lint.",
+            "Auto-correcao de validacao: tentativa 1/2 apos falha em build/test/lint/cobertura.",
             result.StdOut);
         Assert.Contains(
             "Auto-correcao de validacao: validacao passou apos tentativa 1/2.",
@@ -870,6 +1673,144 @@ public sealed class ProgramMainTests
         Assert.Contains(
             "[ERROR] Nao foi possivel concluir a execucao. O modo agente nao conseguiu concluir o objetivo com seguranca.",
             result.StdErr);
+    }
+
+    [Fact]
+    public void Main_AgentCommand_WhenValidatedStateDegrades_RollsBackToLatestStableState()
+    {
+        var temporaryDirectory = CreateTemporaryDirectory();
+        var workspaceRootDirectory = Path.Combine(temporaryDirectory, "workspace-root");
+        var sourceDirectory = Path.Combine(workspaceRootDirectory, "src");
+        var sourceFilePath = Path.Combine(sourceDirectory, "Feature.cs");
+        var newFilePath = Path.Combine(sourceDirectory, "Experimental.cs");
+        var governanceDirectory = Path.Combine(workspaceRootDirectory, UserConfigFile.ConfigDirectoryName);
+        var originalDirectory = Directory.GetCurrentDirectory();
+        var validationBatch = 0;
+        var toolRuntime = new StubToolRuntime((request, _) =>
+        {
+            var script = request.Arguments["script"];
+            if (script.Contains("dotnet build", StringComparison.OrdinalIgnoreCase))
+            {
+                validationBatch++;
+            }
+
+            if (validationBatch == 2
+                && script.Contains("dotnet test", StringComparison.OrdinalIgnoreCase))
+            {
+                return ToolExecutionResult.Failure(
+                    error: "teste quebrou apos segunda mudanca",
+                    exitCode: 1,
+                    duration: TimeSpan.FromMilliseconds(6),
+                    stdOut: "falha em FeatureTests");
+            }
+
+            return ToolExecutionResult.Success("validacao ok", TimeSpan.FromMilliseconds(3));
+        });
+
+        try
+        {
+            Directory.CreateDirectory(sourceDirectory);
+            Directory.CreateDirectory(governanceDirectory);
+            File.WriteAllText(Path.Combine(workspaceRootDirectory, "ASXRunTerminal.slnx"), string.Empty);
+            File.WriteAllText(sourceFilePath, "stable-v1");
+            File.WriteAllText(
+                Path.Combine(governanceDirectory, AgentAutonomyPolicyFile.AgentAutonomyPolicyFileName),
+                """
+                {
+                  "autonomyLevel": "semi-autonomo"
+                }
+                """);
+
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(workspaceRootDirectory);
+
+            var result = ExecuteMainWithModelAwareStreamingExecutorAndToolRuntime(
+                (prompt, _, _) =>
+                {
+                    if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                        && prompt.Contains("Iteracao: 1", StringComparison.Ordinal))
+                    {
+                        File.WriteAllText(sourceFilePath, "stable-v2");
+                        return StreamSingleChunk(
+                            """
+                            CODE_CHANGE_STATUS=changed
+                            CHANGE_FILE=src/Feature.cs
+                            CHANGE_KIND=edit
+                            ```diff
+                            @@ -1 +1 @@
+                            -stable-v1
+                            +stable-v2
+                            ```
+                            TECHNICAL_JUSTIFICATION=Aplica primeira mudanca validada.
+                            """);
+                    }
+
+                    if (prompt.Contains("Fase atual: execute", StringComparison.Ordinal)
+                        && prompt.Contains("Iteracao: 2", StringComparison.Ordinal))
+                    {
+                        File.WriteAllText(sourceFilePath, "degraded");
+                        File.WriteAllText(newFilePath, "degraded");
+                        return StreamSingleChunk(
+                            """
+                            CODE_CHANGE_STATUS=changed
+                            CHANGE_FILE=src/Feature.cs
+                            CHANGE_KIND=edit
+                            ```diff
+                            @@ -1 +1 @@
+                            -stable-v2
+                            +degraded
+                            ```
+                            TECHNICAL_JUSTIFICATION=Aplica segunda mudanca que falha validacao.
+                            CHANGE_FILE=src/Experimental.cs
+                            CHANGE_KIND=create
+                            ```diff
+                            @@ -0,0 +1 @@
+                            +degraded
+                            ```
+                            TECHNICAL_JUSTIFICATION=Cria arquivo experimental que deve ser revertido.
+                            """);
+                    }
+
+                    if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal)
+                        && prompt.Contains("Iteracao: 1", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk("VERIFICATION_STATUS=refine\nContinuar com segunda mudanca.");
+                    }
+
+                    if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
+                    {
+                        return StreamSingleChunk("VERIFICATION_STATUS=done\nValidacao aprovada.");
+                    }
+
+                    return StreamSingleChunk("ok");
+                },
+                toolRuntime,
+                "agent",
+                "--max-steps",
+                "2",
+                "aplicar",
+                "mudancas",
+                "com",
+                "rollback");
+
+            Assert.Equal((int)CliExitCode.RuntimeError, result.ExitCode);
+            Assert.Equal("stable-v2", File.ReadAllText(sourceFilePath));
+            Assert.False(File.Exists(newFilePath));
+            Assert.Contains(
+                "Estado estavel atualizado apos validacao automatica bem-sucedida",
+                result.StdOut);
+            Assert.Contains(
+                "Rollback automatico para ultimo estado estavel aplicado",
+                result.StdOut);
+            Assert.Contains("src/Feature.cs", result.StdOut);
+            Assert.Contains("src/Experimental.cs", result.StdOut);
+        }
+        finally
+        {
+            WorkspaceContextFileIndexCatalog.ClearCache();
+            Directory.SetCurrentDirectory(originalDirectory);
+            Directory.Delete(temporaryDirectory, recursive: true);
+        }
     }
 
     [Fact]
@@ -1041,6 +1982,11 @@ public sealed class ProgramMainTests
                         ```
                         TECHNICAL_JUSTIFICATION=Atualiza validacao de parametros.
                         """);
+                }
+
+                if (IsAgentAutoReviewPrompt(prompt))
+                {
+                    return StreamApprovedAgentSelfReview();
                 }
 
                 if (prompt.Contains("Fase atual: verify", StringComparison.Ordinal))
@@ -3068,6 +4014,68 @@ public sealed class ProgramMainTests
         }
     }
 
+    private static ExecutionResult ExecuteMainWithModelAwareStreamingExecutorToolRuntimeAndAgentAudit(
+        Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
+        IToolRuntime toolRuntime,
+        Func<AgentAuditEntry, string> agentAuditAppender,
+        params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+
+        using var stdOutWriter = new StringWriter();
+        using var stdErrWriter = new StringWriter();
+
+        Console.SetOut(stdOutWriter);
+        Console.SetError(stdErrWriter);
+
+        try
+        {
+            var exitCode = Program.RunForTests(
+                args,
+                promptExecutor,
+                toolRuntime,
+                agentAuditAppender);
+            return new ExecutionResult(
+                ExitCode: exitCode,
+                StdOut: stdOutWriter.ToString(),
+                StdErr: stdErrWriter.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+    }
+
+    private static ExecutionResult ExecuteMainWithAgentAuditLoader(
+        Func<IReadOnlyList<AgentAuditEntry>> agentAuditLoader,
+        params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+
+        using var stdOutWriter = new StringWriter();
+        using var stdErrWriter = new StringWriter();
+
+        Console.SetOut(stdOutWriter);
+        Console.SetError(stdErrWriter);
+
+        try
+        {
+            var exitCode = Program.RunForTests(args, agentAuditLoader);
+            return new ExecutionResult(
+                ExitCode: exitCode,
+                StdOut: stdOutWriter.ToString(),
+                StdErr: stdErrWriter.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
+        }
+    }
+
     private static ExecutionResult ExecuteMainWithModelAwareStreamingExecutorAndModels(
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
@@ -3492,6 +4500,20 @@ public sealed class ProgramMainTests
         await Task.CompletedTask;
     }
 
+    private static bool IsAgentAutoReviewPrompt(string prompt)
+    {
+        return prompt.Contains("Fase atual: auto-review", StringComparison.Ordinal);
+    }
+
+    private static IAsyncEnumerable<string> StreamApprovedAgentSelfReview()
+    {
+        return StreamSingleChunk(
+            """
+            SELF_REVIEW_STATUS=approved
+            SELF_REVIEW_FINDINGS=nenhum
+            """);
+    }
+
     private static async IAsyncEnumerable<string> StreamSingleChunkAfterDelay(
         string content,
         int delayMilliseconds,
@@ -3582,6 +4604,42 @@ public sealed class ProgramMainTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(execute(request, cancellationToken));
         }
+    }
+
+    private static AgentAuditEntry CreateAgentBenchmarkAuditEntry(
+        string sessionId,
+        long sessionSequence,
+        DateTimeOffset timestampUtc,
+        string phase,
+        string eventType,
+        string status,
+        int iteration = 0,
+        bool hasExplicitSensitiveOperationApproval = false)
+    {
+        return new AgentAuditEntry(
+            TimestampUtc: timestampUtc,
+            SessionId: sessionId,
+            SessionSequence: sessionSequence,
+            Command: "agent",
+            WorkspaceRootDirectory: "C:/workspace",
+            Objective: "implementar benchmark",
+            Model: "qwen3.5:4b",
+            AutonomyLevel: "autonomo",
+            HasExplicitSensitiveOperationApproval: hasExplicitSensitiveOperationApproval,
+            Iteration: iteration,
+            Phase: phase,
+            EventType: eventType,
+            Status: status,
+            Summary: "Evento auditado.",
+            Detail: string.Empty,
+            ToolName: null,
+            CommandLine: null,
+            ExitCode: null,
+            IsSuccess: null,
+            Duration: TimeSpan.FromMilliseconds(10),
+            IsTimedOut: false,
+            IsCancelled: false,
+            Changes: Array.Empty<AgentAuditChangeEntry>());
     }
 
     private static string CreateTemporaryDirectory()

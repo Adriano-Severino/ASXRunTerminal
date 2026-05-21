@@ -33,12 +33,22 @@ Este guia cobre os fluxos com maior impacto de seguranca no estado atual do prod
    - blocklist default para comandos de alto risco (ex.: `rm`, `remove-item`, `shutdown`, `diskpart`, `dd`);
    - comandos desbloqueados via `allow` exigem aprovacao explicita por execucao com `destructive_approval=sim`;
    - bloqueio retorna `exit code 126`.
-3. Mascaramento de segredos em logs e saidas (`SecretMasker`):
+3. Governanca do modo `agent`:
+   - niveis por projeto em `.asxrun/agent-governance.json` (`assistido`, `semi-autonomo`, `autonomo`);
+   - `destructive_approval=sim` em tool calls do agente exige sessao iniciada com `--approve-sensitive`;
+   - mudancas declaradas como `delete`, `move` ou `rename` sao bloqueadas sem `--approve-sensitive`.
+4. Mascaramento de segredos em logs e saidas (`SecretMasker`):
    - cobre tokens, chaves de API, cabecalhos `Authorization`, JWT, userinfo em URL e blocos de chave privada.
-4. Trilha de auditoria local para `patch` em `~/.asxrun/patch-audit`:
+5. Trilha de auditoria local para `patch` em `~/.asxrun/patch-audit`:
    - registra sessao, contadores de mudanca e diff unificado.
-5. Checkpoints de execucao em `~/.asxrun/execution-checkpoints`:
+6. Trilha de auditoria local para `agent` em `~/.asxrun/agent-audit`:
+   - registra decisoes do ciclo autonomo, comandos de validacao e mudancas declaradas por arquivo.
+7. Checkpoints de execucao em `~/.asxrun/execution-checkpoints`:
    - rastreia comando, etapa e status (`in-progress`, `completed`, `failed`, `cancelled`).
+8. Rollback automatico do modo `agent`:
+   - captura o estado estavel antes do loop e apos validacoes bem-sucedidas;
+   - restaura o ultimo estado estavel quando uma mudanca degrada `build`/`test`/`lint`;
+   - registra o evento de rollback na auditoria do agente.
 
 ## Baseline Recomendado - Uso Local
 1. Executar o CLI em conta de usuario sem privilegios administrativos.
@@ -57,7 +67,7 @@ Este guia cobre os fluxos com maior impacto de seguranca no estado atual do prod
 2. Definir allowlist de endpoints MCP remotos e exigir `https`.
 3. Usar credenciais de curta duracao para MCP remoto e processo formal de rotacao/revogacao.
 4. Separar ambientes (dev/staging/prod) com tokens e catalogos MCP distintos.
-5. Coletar e auditar periodicamente `patch-audit` e `execution-checkpoints` para rastreabilidade.
+5. Coletar e auditar periodicamente `patch-audit`, `agent-audit` e `execution-checkpoints` para rastreabilidade.
 6. Integrar revisao de politica de seguranca em onboarding tecnico e revisoes de mudanca.
 
 ## Templates de Politica
@@ -108,6 +118,7 @@ Observacao: `allow` deve ser usado com parcimonia para comandos destrutivos bloq
 2. Durante execucao:
    - usar `patch --dry-run` para previsao de mudancas;
    - validar diff e escopo antes de aplicar;
+   - usar `asxrun agent --approve-sensitive ...` somente quando delete/move/rename ou comandos sensiveis forem intencionais;
    - evitar prompts com dados pessoais ou segredos desnecessarios.
 3. Fechamento:
    - revisar falhas/bloqueios recorrentes;
@@ -139,7 +150,7 @@ Observacao: `allow` deve ser usado com parcimonia para comandos destrutivos bloq
 - [ ] Baseline de politicas versionado e revisado por seguranca.
 - [ ] Endpoints MCP remotos com allowlist e `https`.
 - [ ] Rotacao de token definida e automatizada.
-- [ ] Auditoria periodica de `patch-audit` e checkpoints.
+- [ ] Auditoria periodica de `patch-audit`, `agent-audit` e checkpoints.
 - [ ] Processo de incidente documentado e testado.
 
 ## Referencias de Codigo

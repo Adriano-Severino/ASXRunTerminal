@@ -187,6 +187,10 @@ internal static class AgentValidationCommandCatalog
 
         if (TryResolveDotNetTarget(workspaceRootDirectory, out var dotNetTarget))
         {
+            var testCommandLine = BuildDotNetTestCommandLine(
+                dotNetTarget,
+                HasDotNetCoverageCollector(workspaceRootDirectory));
+
             return
             [
                 new AgentValidationCommand(
@@ -195,7 +199,7 @@ internal static class AgentValidationCommandCatalog
                     Timeout: BuildTimeout),
                 new AgentValidationCommand(
                     Name: "test",
-                    CommandLine: $"dotnet test {QuoteCommandArgument(dotNetTarget)} --nologo",
+                    CommandLine: testCommandLine,
                     Timeout: TestTimeout),
                 new AgentValidationCommand(
                     Name: "lint",
@@ -224,6 +228,38 @@ internal static class AgentValidationCommandCatalog
         }
 
         return Array.Empty<AgentValidationCommand>();
+    }
+
+    private static string BuildDotNetTestCommandLine(
+        string dotNetTarget,
+        bool collectCoverage)
+    {
+        var commandLine = $"dotnet test {QuoteCommandArgument(dotNetTarget)} --nologo";
+        return collectCoverage
+            ? $"{commandLine} --collect \"XPlat Code Coverage\""
+            : commandLine;
+    }
+
+    private static bool HasDotNetCoverageCollector(string workspaceRootDirectory)
+    {
+        try
+        {
+            return Directory
+                .EnumerateFiles(workspaceRootDirectory, "*.csproj", SearchOption.AllDirectories)
+                .Where(static path => !IsIgnoredDirectoryPath(path))
+                .Any(static path =>
+                {
+                    var content = File.ReadAllText(path);
+                    return content.Contains("coverlet.collector", StringComparison.OrdinalIgnoreCase)
+                        || content.Contains("coverlet.msbuild", StringComparison.OrdinalIgnoreCase);
+                });
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or DirectoryNotFoundException)
+        {
+            return false;
+        }
     }
 
     private static bool TryResolveDotNetTarget(
