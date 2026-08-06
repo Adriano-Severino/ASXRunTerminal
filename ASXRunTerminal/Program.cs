@@ -1,6 +1,10 @@
 using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using ASXRunTerminal.Subagents;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -9,11 +13,14 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.AI;
 
 namespace ASXRunTerminal;
 
-internal static class Program
+internal static partial class Program
 {
+    private static readonly IHost RagHost = RagService.Initialize();
+
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
     private const string AgentMaxStepsFlag = "--max-steps";
@@ -26,7 +33,7 @@ internal static class Program
     private const string AgentMaxCostAliasFlag = "--max_cost";
     private const string AgentApproveSensitiveAliasFlag = "--approve_sensitive";
     private const string AgentBenchmarkMinimumSuccessRateAliasFlag = "--min_success_rate";
-    private const string InteractiveChatPromptPrefix = "> ";
+    private const string InteractiveChatPromptPrefix = "> "; // Será substituído por prompt estilizado
     private const int AgentAutonomousMaxIterations = 8;
     private const int AgentAutoCorrectionMaxAttempts = 2;
     private const string AgentVerificationStatusDone = "done";
@@ -109,6 +116,7 @@ internal static class Program
         "ask",
         "agent",
         "chat",
+        "code-review",
         "doctor",
         "models",
         "context",
@@ -130,7 +138,10 @@ internal static class Program
         "--dry-run",
         "--help",
         "--version",
-        "--clear"
+        "--clear",
+        "--no-rag",
+        "--severity",
+        "--focus"
     ];
     private static int _executionStateSpinnerStep;
     private static readonly Func<string, string?, CancellationToken, IAsyncEnumerable<string>> DefaultPromptExecutor =
@@ -183,9 +194,9 @@ internal static class Program
     private static long _workspacePatchAuditSequence;
     private static long _agentAuditSequence;
 
-    public static int Main(string[] args)
+    public static async Task<int> Main(string[] args)
     {
-        return Run(
+        var result = Run(
             args,
             DefaultPromptExecutor,
             DefaultHealthcheckExecutor,
@@ -197,17 +208,21 @@ internal static class Program
             agentAuditAppender: DefaultAgentAuditAppender,
             executionCheckpointAppender: DefaultExecutionCheckpointAppender,
             executionCheckpointLoader: DefaultExecutionCheckpointLoader);
+        await RagHost.StopAsync();
+        return result;
     }
 
-    internal static int RunForTests(string[] args)
+    internal static async Task<int> RunForTests(string[] args)
     {
-        return Run(
+        var result = Run(
             args,
             DefaultPromptExecutor,
             DefaultHealthcheckExecutor,
             DefaultModelsExecutor,
             DefaultCancelSignalRegistration,
             NoOpUserConfigInitializer);
+        await RagHost.StopAsync();
+        return result;
     }
 
     internal static int RunForTests(string[] args, Action userConfigInitializer)
@@ -774,6 +789,16 @@ internal static class Program
                     executionCheckpointAppender);
             }
 
+            if (parseResult.RunCodeReview)
+            {
+                return ExecuteCodeReview(
+                    parseResult.CodeReviewFiles ?? Array.Empty<string>(),
+                    parseResult.CodeReviewSeverity,
+                    parseResult.CodeReviewFocus,
+                    parseResult.CodeReviewUseRag,
+                    parseResult.SelectedModel);
+            }
+
             ConsoleLogger.Info("ASXRunTerminal CLI inicializado.");
             return (int)CliExitCode.Success;
         }
@@ -787,6 +812,20 @@ internal static class Program
 
     private static ParseResult ParseArguments(string[] args)
     {
+        // Se não houver argumentos, iniciar modo chat automaticamente
+        if (args.Length == 0)
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: true,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: null);
+        }
+
         if (args.Length > 0 && string.Equals(args[0], "agent", StringComparison.OrdinalIgnoreCase))
         {
             return ParseAgentArguments(args);
@@ -800,6 +839,11 @@ internal static class Program
         if (args.Length > 0 && string.Equals(args[0], "chat", StringComparison.OrdinalIgnoreCase))
         {
             return ParseChatArguments(args);
+        }
+
+        if (args.Length > 0 && string.Equals(args[0], "code-review", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseCodeReviewArguments(args);
         }
 
         if (args.Length > 0 && string.Equals(args[0], "doctor", StringComparison.OrdinalIgnoreCase))
@@ -1154,6 +1198,80 @@ internal static class Program
             Error: CliFriendlyError.InvalidArguments(
                 detail: "O comando 'context' nao aceita argumentos adicionais.",
                 suggestion: $"Exemplo: {CliName} context."));
+    }
+
+    private static ParseResult ParseCodeReviewArguments(string[] args)
+    {
+        var files = new List<string>();
+        string? severity = null;
+        string? focus = null;
+        var useRag = true;
+
+        for (var index = 1; index < args.Length; index++)
+        {
+            var argument = args[index];
+
+            if (string.Equals(argument, "--no-rag", StringComparison.OrdinalIgnoreCase))
+            {
+                useRag = false;
+            }
+            else if (argument.StartsWith("--severity=", StringComparison.OrdinalIgnoreCase))
+            {
+                severity = argument.Substring("--severity=".Length);
+            }
+            else if (argument.StartsWith("--focus=", StringComparison.OrdinalIgnoreCase))
+            {
+                focus = argument.Substring("--focus=".Length);
+            }
+            else if (argument.StartsWith("--", StringComparison.OrdinalIgnoreCase))
+            {
+                return new ParseResult(
+                    ShowHelp: false,
+                    ShowVersion: false,
+                    AskPrompt: null,
+                    StartChat: false,
+                    RunDoctor: false,
+                    RunModels: false,
+                    SelectedModel: null,
+                    Error: CliFriendlyError.InvalidArguments(
+                        detail: $"Opcao desconhecida: {argument}",
+                        suggestion: $"Opcoes validas: --no-rag, --severity=<level>, --focus=<area>"));
+            }
+            else
+            {
+                files.Add(argument);
+            }
+        }
+
+        if (files.Count == 0)
+        {
+            return new ParseResult(
+                ShowHelp: false,
+                ShowVersion: false,
+                AskPrompt: null,
+                StartChat: false,
+                RunDoctor: false,
+                RunModels: false,
+                SelectedModel: null,
+                Error: CliFriendlyError.InvalidArguments(
+                    detail: "O comando 'code-review' exige pelo menos um arquivo.",
+                    suggestion: $"Exemplo: {CliName} code-review src/Program.cs"));
+        }
+
+        return new ParseResult(
+            ShowHelp: false,
+            ShowVersion: false,
+            AskPrompt: null,
+            StartChat: false,
+            RunDoctor: false,
+            RunModels: false,
+            SelectedModel: null,
+            Error: null,
+            RunCodeReview: true,
+            CodeReviewFiles: files.ToArray(),
+            CodeReviewSeverity: severity,
+            CodeReviewFocus: focus,
+            CodeReviewUseRag: useRag);
     }
 
     private static ParseResult ParsePatchArguments(string[] args)
@@ -5342,9 +5460,7 @@ internal static class Program
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Func<IReadOnlyList<PromptHistoryEntry>> historyLoader)
     {
-        ConsoleLogger.Info("Modo interativo iniciado. Digite 'exit' para sair.");
-        ConsoleLogger.Info("Comandos interativos disponiveis: /help, /clear, /models, /tools, /exit.");
-        ConsoleLogger.Info("Atalhos do teclado: setas para historico, Ctrl+R para busca incremental, Tab para autocomplete e Esc para cancelar busca.");
+        RenderWelcomeScreen();
 
         var historyPrompts = LoadInteractiveChatHistoryPrompts(historyLoader);
         var inputNavigator = new ChatInputHistoryNavigator(historyPrompts);
@@ -5621,7 +5737,7 @@ internal static class Program
 
         if (Console.IsInputRedirected)
         {
-            Console.Write(InteractiveChatPromptPrefix);
+            Console.Write(RenderStyledPrompt());
             return Console.ReadLine();
         }
 
@@ -5730,7 +5846,8 @@ internal static class Program
         ref int previousRenderedLength)
     {
         var searchSuffix = BuildInteractiveChatSearchSuffix(navigator);
-        var renderedLine = $"{InteractiveChatPromptPrefix}{navigator.CurrentInput}{searchSuffix}";
+        var styledPrompt = RenderStyledPrompt();
+        var renderedLine = $"{styledPrompt}{navigator.CurrentInput}{searchSuffix}";
         var clearPaddingLength = Math.Max(0, previousRenderedLength - renderedLine.Length);
         var clearPadding = clearPaddingLength == 0
             ? string.Empty
@@ -5738,6 +5855,21 @@ internal static class Program
 
         Console.Write($"\r{renderedLine}{clearPadding}");
         previousRenderedLength = renderedLine.Length;
+    }
+
+    private static string RenderStyledPrompt()
+    {
+        try
+        {
+            var designSystem = ConsoleLogger.CurrentDesignSystem;
+            var renderer = AnsiTerminalRenderer.CreateDefault(designSystem);
+            var prompt = "asxrun>";
+            return renderer.Render(prompt, designSystem.AccentStyle);
+        }
+        catch
+        {
+            return InteractiveChatPromptPrefix;
+        }
     }
 
     private static string BuildInteractiveChatSearchSuffix(ChatInputHistoryNavigator navigator)
@@ -6661,6 +6793,143 @@ internal static class Program
         Console.WriteLine("Instrucoes:");
         Console.WriteLine(skill.Instruction);
         return (int)CliExitCode.Success;
+    }
+
+    private static int ExecuteCodeReview(
+        string[] files,
+        string? severity,
+        string? focus,
+        bool useRag,
+        string? model)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+
+        ConsoleLogger.Info($"Iniciando revisao de codigo para {files.Length} arquivo(s).");
+
+        try
+        {
+            var codeReviewer = RagHost.Services.GetRequiredService<ICodeReviewerSubagent>();
+            var context = new CodeReviewContext
+            {
+                FilePaths = files,
+                UseRag = useRag,
+                Model = model ?? OllamaModelDefaults.DefaultModel,
+                CheckProjectRules = true
+            };
+
+            // Parse severity if provided
+            if (!string.IsNullOrEmpty(severity) && Enum.TryParse<CodeReviewSeverity>(severity, true, out var parsedSeverity))
+            {
+                context.MinSeverity = parsedSeverity;
+            }
+
+            // Parse focus if provided
+            if (!string.IsNullOrEmpty(focus) && Enum.TryParse<CodeReviewFocus>(focus, true, out var parsedFocus))
+            {
+                context.Focus = parsedFocus;
+            }
+
+            var cts = new CancellationTokenSource();
+            var cancelRegistration = RegisterConsoleCancelHandler(cts, () =>
+            {
+                ConsoleLogger.Warning("Revisao de codigo cancelada pelo usuario.");
+            });
+
+            using (cancelRegistration)
+            {
+                var result = codeReviewer.ReviewCodeAsync(context, cts.Token).GetAwaiter().GetResult();
+
+                ConsoleLogger.Info($"Revisao concluida em {result.DurationMs}ms.");
+
+                // Display results
+                DisplayCodeReviewResults(result);
+
+                return result.Status == CodeReviewStatus.Completed 
+                    ? (int)CliExitCode.Success 
+                    : (int)CliExitCode.GeneralError;
+            }
+        }
+        catch (Exception ex)
+        {
+            var error = CliFriendlyError.Runtime($"Erro ao executar revisao de codigo: {ex.Message}");
+            WriteFriendlyError(error);
+            return (int)error.ExitCode;
+        }
+    }
+
+    private static void DisplayCodeReviewResults(CodeReviewResult result)
+    {
+        Console.WriteLine();
+        ConsoleLogger.Info("=== Resultado da Revisao de Codigo ===");
+        Console.WriteLine();
+
+        // Display metrics
+        Console.WriteLine("Metricas:");
+        Console.WriteLine($"  Arquivos revisados: {result.Metrics.TotalFiles}");
+        Console.WriteLine($"  Linhas analisadas: {result.Metrics.TotalLines}");
+        Console.WriteLine($"  Score de qualidade: {result.Metrics.QualityScore}/100");
+        Console.WriteLine($"  Conformidade com regras: {result.Metrics.ProjectRuleCompliance}/100");
+        Console.WriteLine();
+
+        // Display issues by severity
+        if (result.Issues.Count > 0)
+        {
+            ConsoleLogger.Warning("Problemas encontrados:");
+            Console.WriteLine();
+
+            foreach (var issue in result.Issues)
+            {
+                var severityColor = issue.Severity switch
+                {
+                    CodeReviewSeverity.Critical => "🔴",
+                    CodeReviewSeverity.High => "🟠",
+                    CodeReviewSeverity.Medium => "🟡",
+                    CodeReviewSeverity.Low => "🟢",
+                    CodeReviewSeverity.Info => "🔵",
+                    _ => "⚪"
+                };
+
+                Console.WriteLine($"{severityColor} [{issue.Severity}] {issue.Title}");
+                Console.WriteLine($"   Arquivo: {issue.FilePath}");
+                if (issue.LineNumber.HasValue)
+                {
+                    Console.WriteLine($"   Linha: {issue.LineNumber}");
+                }
+                Console.WriteLine($"   Categoria: {issue.Category}");
+                Console.WriteLine($"   Descricao: {issue.Description}");
+                if (!string.IsNullOrEmpty(issue.Suggestion))
+                {
+                    Console.WriteLine($"   Sugestao: {issue.Suggestion}");
+                }
+                Console.WriteLine();
+            }
+        }
+        else
+        {
+            ConsoleLogger.Success("Nenhum problema encontrado!");
+            Console.WriteLine();
+        }
+
+        // Display RAG context if available
+        if (result.RagContext != null)
+        {
+            Console.WriteLine("Contexto RAG:");
+            Console.WriteLine($"  Documentos recuperados: {result.RagContext.DocumentsRetrieved}");
+            Console.WriteLine($"  Similaridade media: {result.RagContext.AverageSimilarity:F2}");
+            Console.WriteLine($"  Tempo RAG: {result.RagContext.RagDurationMs}ms");
+            Console.WriteLine();
+        }
+
+        // Display recommendations
+        if (result.Recommendations.Count > 0)
+        {
+            ConsoleLogger.Info("Recomendacoes:");
+            foreach (var recommendation in result.Recommendations)
+            {
+                Console.WriteLine($"  - {recommendation}");
+            }
+            Console.WriteLine();
+        }
     }
 
     private static int ExecuteSkill(
@@ -8005,32 +8274,15 @@ internal static class Program
 
     private static async Task<OllamaHealthcheckResult> ExecuteDefaultHealthcheckAsync(CancellationToken cancellationToken)
     {
-        var userConfig = UserConfigFile.Load();
-
-        using var httpClient = new HttpClient
-        {
-            Timeout = userConfig.HealthcheckTimeout
-        };
-
-        IOllamaHttpClient ollamaClient = new OllamaHttpClient(
-            httpClient,
-            baseAddress: userConfig.OllamaHost);
-        return await ollamaClient.CheckHealthAsync(cancellationToken);
+        var httpClient = RagHost.Services.GetRequiredService<OllamaHttpClient>();
+        return await httpClient.CheckHealthAsync(cancellationToken);
     }
 
     private static async Task<IReadOnlyList<OllamaLocalModel>> ExecuteDefaultModelsAsync(CancellationToken cancellationToken)
     {
-        var userConfig = UserConfigFile.Load();
-
-        using var httpClient = new HttpClient
-        {
-            Timeout = userConfig.ModelsTimeout
-        };
-
-        IOllamaHttpClient ollamaClient = new OllamaHttpClient(
-            httpClient,
-            baseAddress: userConfig.OllamaHost);
-        return await ollamaClient.ListLocalModelsAsync(cancellationToken);
+        var httpClient = RagHost.Services.GetRequiredService<OllamaHttpClient>();
+        var models = await httpClient.ListLocalModelsAsync(cancellationToken);
+        return models.Select(m => new OllamaLocalModel(m.Name)).ToList();
     }
 
     private static async Task<PromptStreamMetrics> StreamPromptResponseAsync(
@@ -8752,21 +9004,25 @@ internal static class Program
         string? model,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        var chatClient = RagHost.Services.GetRequiredService<IChatClient>();
         var userConfig = UserConfigFile.Load();
         var resolvedModel = ResolveModelWithConfigFallback(model, userConfig);
 
-        using var httpClient = new HttpClient
-        {
-            Timeout = userConfig.PromptTimeout
-        };
+        var messages = new[] { new ChatMessage(new ChatRole("user"), prompt) };
+        var options = new ChatOptions { ModelId = resolvedModel };
 
-        IOllamaHttpClient ollamaClient = new OllamaHttpClient(
-            httpClient,
-            baseAddress: userConfig.OllamaHost,
-            defaultModel: resolvedModel);
-        await foreach (var chunk in ollamaClient.GenerateStreamAsync(prompt, cancellationToken).WithCancellation(cancellationToken))
+        await foreach (var update in chatClient.GetStreamingResponseAsync(messages, options, cancellationToken))
         {
-            yield return chunk;
+            if (update.Contents.Count > 0)
+            {
+                foreach (var content in update.Contents)
+                {
+                    if (content is TextContent textContent && !string.IsNullOrEmpty(textContent.Text))
+                    {
+                        yield return textContent.Text;
+                    }
+                }
+            }
         }
     }
 
@@ -9292,5 +9548,140 @@ internal static class Program
         decimal? AgentMaxCost = null,
         bool RunAgentBenchmark = false,
         decimal? AgentBenchmarkMinimumSuccessRate = null,
-        bool AgentSensitiveOperationsApproved = false);
+        bool AgentSensitiveOperationsApproved = false,
+        bool RunCodeReview = false,
+        string[]? CodeReviewFiles = null,
+        string? CodeReviewSeverity = null,
+        string? CodeReviewFocus = null,
+        bool CodeReviewUseRag = true);
+
+    private static void RenderWelcomeScreen()
+    {
+        try
+        {
+            var designSystem = ConsoleLogger.CurrentDesignSystem;
+            var renderer = AnsiTerminalRenderer.CreateDefault(designSystem);
+            var terminalWidth = GetTerminalWidth();
+
+            // Logo ASCII art dinâmico
+            var logo = BuildDynamicLogo(terminalWidth);
+            Console.WriteLine(renderer.Render(logo, designSystem.AccentStyle));
+            Console.WriteLine();
+
+            // Header expandido com informações
+            var header = TerminalVisualComponents.BuildHeader("ASXRunTerminal v0.1.0", "Local AI Development Environment", terminalWidth - 4);
+            Console.WriteLine(renderer.Render((string)header, designSystem.PrimaryTextStyle));
+            Console.WriteLine();
+            Console.WriteLine();
+
+            // Informações do sistema com mais espaçamento
+            var userConfig = UserConfigFile.Load();
+            var modelInfo = $"Modelo:      {userConfig.DefaultModel ?? OllamaModelDefaults.DefaultModel}";
+            var hostInfo = $"Host:        {userConfig.OllamaHost}";
+            var themeInfo = $"Tema:        {designSystem.ThemeMode}";
+            var versionInfo = $"Versão:     0.1.0";
+            var runtimeInfo = $"Runtime:    .NET 10.0";
+
+            Console.WriteLine(renderer.Render($"  {modelInfo}", designSystem.InfoStyle));
+            Console.WriteLine(renderer.Render($"  {hostInfo}", designSystem.InfoStyle));
+            Console.WriteLine(renderer.Render($"  {themeInfo}", designSystem.InfoStyle));
+            Console.WriteLine(renderer.Render($"  {versionInfo}", designSystem.InfoStyle));
+            Console.WriteLine(renderer.Render($"  {runtimeInfo}", designSystem.InfoStyle));
+            Console.WriteLine();
+            Console.WriteLine();
+
+            // Separador expandido
+            var separator = TerminalVisualComponents.BuildSeparator("Comandos Disponíveis", terminalWidth - 4, '=');
+            Console.WriteLine(renderer.Render((string)separator, designSystem.BorderStyle));
+            Console.WriteLine();
+
+            // Comandos disponíveis com mais espaçamento
+            var commands = new[]
+            {
+                ("/help", "Mostrar ajuda e informações do sistema"),
+                ("/clear", "Limpar histórico da conversa atual"),
+                ("/models", "Listar todos os modelos Ollama disponíveis"),
+                ("/tools", "Listar ferramentas e capacidades do agente"),
+                ("/exit", "Encerrar a sessão do chat interativo")
+            };
+
+            foreach (var (cmd, desc) in commands)
+            {
+                var cmdStyled = renderer.Render(cmd.PadRight(12), designSystem.AccentStyle);
+                var descStyled = renderer.Render(desc, designSystem.MutedTextStyle);
+                Console.WriteLine($"  {cmdStyled}  {descStyled}");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine();
+
+            // Atalhos do teclado
+            var separator2 = TerminalVisualComponents.BuildSeparator("Atalhos do Teclado", terminalWidth - 4, '=');
+            Console.WriteLine(renderer.Render((string)separator2, designSystem.BorderStyle));
+            Console.WriteLine();
+
+            var shortcuts = new[]
+            {
+                ("↑ ↓", "Navegar pelo histórico de comandos"),
+                ("Ctrl+R", "Busca incremental no histórico"),
+                ("Tab", "Autocomplete de comandos e opções"),
+                ("Esc", "Cancelar busca atual"),
+                ("Ctrl+C", "Forçar encerramento da sessão")
+            };
+
+            foreach (var (shortcut, desc) in shortcuts)
+            {
+                var shortcutStyled = renderer.Render(shortcut.PadRight(10), designSystem.WarningStyle);
+                var descStyled = renderer.Render(desc, designSystem.MutedTextStyle);
+                Console.WriteLine($"  {shortcutStyled}  {descStyled}");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine();
+
+            // Separador final
+            var separator3 = TerminalVisualComponents.BuildSeparator(width: terminalWidth - 4, fill: '=');
+            Console.WriteLine(renderer.Render((string)separator3, designSystem.BorderStyle));
+            Console.WriteLine();
+        }
+        catch
+        {
+            ConsoleLogger.Info("Modo interativo iniciado. Digite 'exit' para sair.");
+            ConsoleLogger.Info("Comandos interativos disponiveis: /help, /clear, /models, /tools, /exit.");
+            ConsoleLogger.Info("Atalhos do teclado: setas para historico, Ctrl+R para busca incremental, Tab para autocomplete e Esc para cancelar busca.");
+        }
+    }
+
+    private static int GetTerminalWidth()
+    {
+        try
+        {
+            return Math.Max(80, Console.WindowWidth);
+        }
+        catch
+        {
+            return 80; // Fallback para ambientes onde WindowWidth não está disponível
+        }
+    }
+
+    private static string BuildDynamicLogo(int width)
+    {
+        var innerWidth = width - 4; // 2 para bordas laterais
+        var line = new string('═', innerWidth);
+        
+        var appName = "ASXRunTerminal CLI";
+        var subtitle = "AI-Powered Development Terminal";
+        
+        // Centralizar textos
+        var appNamePadding = (innerWidth - appName.Length) / 2;
+        var subtitlePadding = (innerWidth - subtitle.Length) / 2;
+        
+        var centeredAppName = appName.PadLeft(appNamePadding + appName.Length).PadRight(innerWidth);
+        var centeredSubtitle = subtitle.PadLeft(subtitlePadding + subtitle.Length).PadRight(innerWidth);
+        
+        return $@"╔{line}╗
+║{centeredAppName}║
+║{centeredSubtitle}║
+╚{line}╝";
+    }
 }

@@ -59,6 +59,38 @@ internal static class SkillCatalog
                 Atue como redator tecnico para engenharia de software.
                 Produza documentacao clara com objetivo, pre-requisitos, exemplos e limites.
                 Priorize instrucoes acionaveis e consistentes com o codigo.
+                """),
+        new SkillDefinition(
+            Name: "code-reviewer",
+            Description: "Revisa codigo abrangente seguindo boas praticas do projeto ASXRunTerminal.",
+            Instruction:
+                """
+                Atue como um engenheiro de software senior especializado em revisao de codigo para o projeto ASXRunTerminal. Priorize:
+                - Uso de implicit operator em vez de AutoMapper (conforme regras do projeto)
+                - Cobertura de testes adequada para comportamentos alterados
+                - Seguranca e privacidade (sem exposicao de segredos, validacao de entrada)
+                - Performance e escalabilidade (evitar custos computacionais desnecessarios)
+                - Legibilidade e manutenibilidade (codigo idiomatico, nomes claros)
+                - Conformidade com padroes do projeto C#/.NET
+                - Tratamento adequado de erros e excecoes
+                Liste os problemas por severidade (critica, alta, media, baixa) com recomendacoes objetivas e acionaveis.
+                """),
+        new SkillDefinition(
+            Name: "bug-hunter",
+            Description: "Identifica proativamente bugs e edge cases que podem ter escapado no desenvolvimento.",
+            Instruction:
+                """
+                Atue como um especialista em QA e segurança focado em encontrar bugs ocultos. Analise:
+                - Edge cases e condicoes de erro nao tratadas
+                - Validacao insuficiente de entrada e saida
+                - Tratamento inadequado de excecoes e null references
+                - Condicoes de corrida e problemas de concorrencia
+                - Vazamentos de recursos (IDs nao descartados, conexoes nao fechadas)
+                - Problemas de encoding e internacionalizacao
+                - Casos nao cobertos pelos testes existentes
+                - Vulnerabilidades de segurança (injection, XSS, etc.)
+                - Problemas de performance em cenarios de carga
+                Para cada bug encontrado, inclua: severidade, descricao detalhada, cenario de reproducao e sugestao de correcao.
                 """)
     ];
 

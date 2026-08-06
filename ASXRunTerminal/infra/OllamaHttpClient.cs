@@ -1,377 +1,346 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using ASXRunTerminal.Core;
 using Microsoft.Extensions.AI;
-using OllamaSharp;
-using OllamaSharp.Models;
-using System.Net;
-using System.Runtime.CompilerServices;
-using System.Text;
-using System.Text.Json;
 
 namespace ASXRunTerminal.Infra;
 
+/// <summary>
+/// Cliente HTTP de baixo nivel para a API local do Ollama. Encapsula
+/// <c>POST /api/generate</c>, <c>GET /api/version</c> e <c>GET /api/tags</c>,
+/// expondo tambem um adapter <see cref="IChatClient"/> para integracao com o
+/// Microsoft Agent Framework.
+/// </summary>
 internal sealed class OllamaHttpClient : IOllamaHttpClient
 {
-    private const int MaxAttempts = 2;
-    private static readonly Uri DefaultBaseAddress = new("http://127.0.0.1:11434/", UriKind.Absolute);
-    private static readonly TimeSpan DefaultRetryDelay = TimeSpan.FromMilliseconds(200);
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
 
-    private readonly IOllamaApiClient _ollamaApiClient;
+    private readonly HttpClient _httpClient;
+    private readonly string? _defaultModel;
+    private readonly Func<string, string?>? _environmentVariableReader;
     private readonly TimeSpan _retryDelay;
+    private readonly Lazy<IChatClient> _chatClient;
 
     public OllamaHttpClient(
         HttpClient httpClient,
-        Uri? baseAddress = null,
         string? defaultModel = null,
-        TimeSpan? retryDelay = null,
-        Func<string, string?>? environmentVariableReader = null)
+        Func<string, string?>? environmentVariableReader = null,
+        Uri? baseAddress = null,
+        TimeSpan? retryDelay = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
 
-        httpClient.BaseAddress ??= baseAddress ?? DefaultBaseAddress;
-
-        _ollamaApiClient = new OllamaApiClient(
-            client: httpClient,
-            defaultModel: OllamaModelDefaults.Resolve(defaultModel, environmentVariableReader),
-            jsonSerializerContext: null);
-
-        _retryDelay = retryDelay ?? DefaultRetryDelay;
-        ArgumentOutOfRangeException.ThrowIfLessThan(_retryDelay, TimeSpan.Zero);
+        _httpClient = httpClient;
+        _defaultModel = defaultModel;
+        _environmentVariableReader = environmentVariableReader;
+        _retryDelay = retryDelay ?? TimeSpan.FromMilliseconds(200);
+        BaseAddress = baseAddress ?? OllamaModelDefaults.DefaultEndpoint;
+        _chatClient = new Lazy<IChatClient>(CreateChatClientAdapter);
     }
 
-    public Uri BaseAddress => _ollamaApiClient.Uri;
-    public IChatClient ChatClient => (IChatClient)_ollamaApiClient;
+    public Uri BaseAddress { get; }
+
+    public IChatClient ChatClient => _chatClient.Value;
+
+    public Task<OllamaHealthcheckResult> CheckHealthAsync(CancellationToken cancellationToken = default)
+    {
+        return CheckHealthWithRetryAsync(cancellationToken);
+    }
+
+    public Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default)
+    {
+        return GenerateAsync(prompt, model: null, cancellationToken);
+    }
+
+    public async Task<string> GenerateAsync(string prompt, string? model, CancellationToken cancellationToken = default)
+    {
+        ValidatePrompt(prompt);
+
+        var resolvedModel = ResolveModel(model);
+        var payload = new GenerateRequest(resolvedModel, prompt, Stream: false);
+        var aggregatedContent = new System.Text.StringBuilder();
+        var anyChunkParsed = false;
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(BaseAddress, "api/generate"))
+            {
+                Content = JsonContent.Create(payload, options: JsonOptions),
+            };
+
+            using var response = await _httpClient
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"O Ollama retornou status HTTP {(int)response.StatusCode} ao gerar a resposta.");
+            }
+
+            await using var stream = await response.Content
+                .ReadAsStreamAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            await foreach (var chunk in JsonSerializer
+                .DeserializeAsyncEnumerable<GenerateChunk>(stream, JsonOptions, cancellationToken)
+                .ConfigureAwait(false))
+            {
+                if (chunk is null)
+                {
+                    continue;
+                }
+
+                if (!string.IsNullOrEmpty(chunk.Response))
+                {
+                    aggregatedContent.Append(chunk.Response);
+                    anyChunkParsed = true;
+                }
+            }
+        }
+        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                "O Ollama nao respondeu dentro do tempo limite configurado.",
+                exception);
+        }
+        catch (HttpRequestException exception)
+        {
+            var statusCode = (int)(exception.StatusCode ?? HttpStatusCode.InternalServerError);
+            throw new InvalidOperationException(
+                $"O Ollama retornou status HTTP {statusCode} ao gerar a resposta.",
+                exception);
+        }
+
+        if (!anyChunkParsed)
+        {
+            throw new InvalidOperationException(
+                "O Ollama retornou uma resposta vazia para o prompt informado.");
+        }
+
+        return aggregatedContent.ToString().Trim();
+    }
 
     public async IAsyncEnumerable<string> GenerateStreamAsync(
         string prompt,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(prompt))
-        {
-            throw new ArgumentException("O prompt informado nao pode estar vazio.", nameof(prompt));
-        }
+        ValidatePrompt(prompt);
 
-        var request = new GenerateRequest
-        {
-            Model = _ollamaApiClient.SelectedModel,
-            Prompt = prompt.Trim(),
-            Stream = true
-        };
+        var resolvedModel = ResolveModel();
+        var payload = new GenerateRequest(resolvedModel, prompt, Stream: true);
 
-        var hasContent = false;
-        await using var enumerator = CreateGenerateResponseEnumerator(request, cancellationToken);
-        while (true)
-        {
-            GenerateResponseStream? current;
-
-            try
-            {
-                if (!await enumerator.MoveNextAsync())
-                {
-                    break;
-                }
-
-                current = enumerator.Current;
-            }
-            catch (Exception ex)
-            {
-                if (hasContent && IsRecoverablePartialGenerateError(ex))
-                {
-                    // Preserve already streamed text when the remaining payload is malformed/truncated.
-                    break;
-                }
-
-                throw MapGenerateException(ex, cancellationToken);
-            }
-
-            if (current is null)
-            {
-                if (hasContent)
-                {
-                    break;
-                }
-
-                throw new InvalidOperationException(
-                    "O payload de geracao retornado pelo Ollama e invalido.");
-            }
-
-            if (string.IsNullOrEmpty(current.Response))
-            {
-                continue;
-            }
-
-            hasContent = true;
-            yield return current.Response;
-        }
-
-        if (!hasContent)
-        {
-            throw new InvalidOperationException(
-                "O Ollama retornou uma resposta vazia para o prompt informado.");
-        }
-    }
-
-    public async Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default)
-    {
-        var responseBuilder = new StringBuilder();
-
-        await foreach (var chunk in GenerateStreamAsync(prompt, cancellationToken))
-        {
-            responseBuilder.Append(chunk);
-        }
-
-        return ValidateGeneratedResponse(responseBuilder.ToString());
-    }
-
-    public async Task<OllamaHealthcheckResult> CheckHealthAsync(CancellationToken cancellationToken = default)
-    {
-        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
-        {
-            try
-            {
-                var version = await _ollamaApiClient.GetVersionAsync(cancellationToken);
-                OllamaHealthcheckResult result = version;
-                return result;
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                if (CanRetry(attempt))
-                {
-                    await WaitBeforeRetryAsync(cancellationToken);
-                    continue;
-                }
-
-                return OllamaHealthcheckResult.Unhealthy(
-                    $"O tempo limite para conectar ao Ollama em '{BaseAddress}' foi excedido apos {MaxAttempts} tentativas.");
-            }
-            catch (HttpRequestException ex) when (ShouldRetry(ex.StatusCode, attempt))
-            {
-                await WaitBeforeRetryAsync(cancellationToken);
-                continue;
-            }
-            catch (HttpRequestException ex)
-            {
-                return OllamaHealthcheckResult.Unhealthy(
-                    BuildHttpRequestError(ex));
-            }
-            catch (ArgumentException)
-            {
-                return OllamaHealthcheckResult.Unhealthy(
-                    "O payload de versao retornado pelo Ollama e invalido.");
-            }
-            catch (FormatException)
-            {
-                return OllamaHealthcheckResult.Unhealthy(
-                    "O payload de versao retornado pelo Ollama e invalido.");
-            }
-            catch (NotSupportedException ex)
-            {
-                return OllamaHealthcheckResult.Unhealthy(
-                    $"O formato da resposta do Ollama nao e suportado. {ex.Message}");
-            }
-            catch (JsonException ex) when (IsVersionPayloadError(ex))
-            {
-                return OllamaHealthcheckResult.Unhealthy(
-                    "O payload de versao retornado pelo Ollama e invalido.");
-            }
-            catch (JsonException ex)
-            {
-                return OllamaHealthcheckResult.Unhealthy(
-                    $"Nao foi possivel interpretar a resposta do Ollama. {ex.Message}");
-            }
-        }
-
-        return OllamaHealthcheckResult.Unhealthy(
-            "Nao foi possivel validar a disponibilidade do Ollama.");
-    }
-
-    public async Task<IReadOnlyList<OllamaLocalModel>> ListLocalModelsAsync(CancellationToken cancellationToken = default)
-    {
+        HttpResponseMessage response;
         try
         {
-            var models = await _ollamaApiClient.ListLocalModelsAsync(cancellationToken);
-            if (models is null)
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(BaseAddress, "api/generate"))
             {
-                return [];
-            }
+                Content = JsonContent.Create(payload, options: JsonOptions),
+            };
 
-            return [.. models.Select(static model => (OllamaLocalModel)model)];
+            response = await _httpClient
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
             throw new TimeoutException(
-                $"O tempo limite para listar modelos locais no Ollama em '{BaseAddress}' foi excedido.");
+                "O Ollama nao respondeu dentro do tempo limite configurado.",
+                exception);
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException exception)
         {
-            throw new InvalidOperationException(BuildHttpRequestError(ex), ex);
-        }
-        catch (ArgumentException ex)
-        {
+            var statusCode = (int)(exception.StatusCode ?? HttpStatusCode.InternalServerError);
             throw new InvalidOperationException(
-                "O payload de modelos retornado pelo Ollama e invalido.",
-                ex);
+                $"O Ollama retornou status HTTP {statusCode} ao iniciar o streaming.",
+                exception);
         }
-        catch (FormatException ex)
+
+        await using var stream = await response.Content
+            .ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        await foreach (var chunk in JsonSerializer
+            .DeserializeAsyncEnumerable<GenerateChunk>(stream, JsonOptions, cancellationToken)
+            .WithCancellation(cancellationToken)
+            .ConfigureAwait(false))
         {
-            throw new InvalidOperationException(
-                "O payload de modelos retornado pelo Ollama e invalido.",
-                ex);
+            if (chunk is null || string.IsNullOrEmpty(chunk.Response))
+            {
+                continue;
+            }
+
+            yield return chunk.Response;
         }
-        catch (NotSupportedException ex)
-        {
-            throw new InvalidOperationException(
-                $"O formato da resposta do Ollama nao e suportado. {ex.Message}",
-                ex);
-        }
-        catch (JsonException ex)
-        {
-            throw new InvalidOperationException(
-                $"Nao foi possivel interpretar a resposta de modelos do Ollama. {ex.Message}",
-                ex);
-        }
+
+        response.Dispose();
     }
 
-    private IAsyncEnumerator<GenerateResponseStream?> CreateGenerateResponseEnumerator(
-        GenerateRequest request,
-        CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<OllamaLocalModel>> ListLocalModelsAsync(
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            return _ollamaApiClient.GenerateAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseAddress, "api/tags"));
+            using var response = await _httpClient
+                .SendAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"O Ollama retornou status HTTP {(int)response.StatusCode} ao listar os modelos locais.");
+            }
+
+            var payload = await response.Content
+                .ReadFromJsonAsync<TagsResponse>(JsonOptions, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (payload?.Models is null)
+            {
+                throw new InvalidOperationException(
+                    "O payload de modelos retornado pelo Ollama e invalido.");
+            }
+
+            var result = new List<OllamaLocalModel>(payload.Models.Count);
+            foreach (var entry in payload.Models)
+            {
+                var resolvedName = string.IsNullOrWhiteSpace(entry.Name)
+                    ? entry.Model
+                    : entry.Name;
+
+                if (string.IsNullOrWhiteSpace(resolvedName))
+                {
+                    throw new InvalidOperationException(
+                        "O payload de modelos retornado pelo Ollama e invalido.");
+                }
+
+                result.Add(new OllamaLocalModel(resolvedName.Trim()));
+            }
+
+            return result;
         }
-        catch (Exception ex)
+        catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            throw MapGenerateException(ex, cancellationToken);
+            throw new TimeoutException(
+                "O Ollama nao respondeu dentro do tempo limite configurado.",
+                exception);
         }
-    }
-
-    private Exception MapGenerateException(Exception exception, CancellationToken cancellationToken)
-    {
-        return exception switch
+        catch (HttpRequestException exception)
         {
-            InvalidOperationException => exception,
-            TimeoutException => exception,
-            OperationCanceledException when !cancellationToken.IsCancellationRequested
-                => new TimeoutException(
-                    $"O tempo limite para gerar resposta no Ollama em '{BaseAddress}' foi excedido."),
-            HttpRequestException httpException
-                => new InvalidOperationException(BuildHttpRequestError(httpException), httpException),
-            ArgumentException argumentException when argumentException.ParamName is "prompt"
-                => argumentException,
-            ArgumentException argumentException
-                => new InvalidOperationException(
-                    "O payload de geracao retornado pelo Ollama e invalido.",
-                    argumentException),
-            FormatException formatException
-                => new InvalidOperationException(
-                    "O payload de geracao retornado pelo Ollama e invalido.",
-                    formatException),
-            NotSupportedException notSupportedException
-                => new InvalidOperationException(
-                    $"O formato da resposta do Ollama nao e suportado. {notSupportedException.Message}",
-                    notSupportedException),
-            JsonException jsonException when IsGeneratePayloadError(jsonException)
-                => new InvalidOperationException(
-                    "O payload de geracao retornado pelo Ollama e invalido.",
-                    jsonException),
-            JsonException jsonException
-                => new InvalidOperationException(
-                    $"Nao foi possivel interpretar a resposta de geracao do Ollama. {jsonException.Message}",
-                    jsonException),
-            _ => exception
-        };
-    }
-
-    private static bool ShouldRetry(HttpStatusCode? statusCode, int attempt)
-    {
-        if (!CanRetry(attempt))
-        {
-            return false;
-        }
-
-        if (statusCode is null)
-        {
-            return true;
-        }
-
-        return statusCode == HttpStatusCode.RequestTimeout
-            || statusCode == HttpStatusCode.TooManyRequests
-            || (int)statusCode >= 500;
-    }
-
-    private static bool CanRetry(int attempt)
-    {
-        return attempt < MaxAttempts;
-    }
-
-    private async Task WaitBeforeRetryAsync(CancellationToken cancellationToken)
-    {
-        if (_retryDelay == TimeSpan.Zero)
-        {
-            return;
-        }
-
-        await Task.Delay(_retryDelay, cancellationToken);
-    }
-
-    private string BuildHttpRequestError(HttpRequestException exception)
-    {
-        if (exception.StatusCode is HttpStatusCode statusCode)
-        {
-            return $"O Ollama respondeu com HTTP {(int)statusCode} ({statusCode}).";
-        }
-
-        return $"Nao foi possivel conectar ao Ollama em '{BaseAddress}'. {exception.Message}";
-    }
-
-    private static bool IsVersionPayloadError(JsonException exception)
-    {
-        return exception.Path?.Contains("version", StringComparison.OrdinalIgnoreCase) == true
-            || exception.Message.Contains("System.Version", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsGeneratePayloadError(JsonException exception)
-    {
-        return exception.Path?.Contains("response", StringComparison.OrdinalIgnoreCase) == true
-            || exception.Message.Contains("GenerateResponseStream", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsRecoverablePartialGenerateError(Exception exception)
-    {
-        return exception switch
-        {
-            JsonException => true,
-            FormatException => true,
-            NotSupportedException => true,
-            ArgumentException argumentException when argumentException.ParamName is not "prompt" => true,
-            InvalidOperationException invalidOperationException
-                when IsRecoverablePartialGenerateErrorFromInnerException(invalidOperationException.InnerException) => true,
-            _ => false
-        };
-    }
-
-    private static bool IsRecoverablePartialGenerateErrorFromInnerException(Exception? exception)
-    {
-        return exception switch
-        {
-            null => false,
-            JsonException => true,
-            FormatException => true,
-            NotSupportedException => true,
-            ArgumentException argumentException when argumentException.ParamName is not "prompt" => true,
-            _ => false
-        };
-    }
-
-    private static string ValidateGeneratedResponse(string? response)
-    {
-        if (string.IsNullOrWhiteSpace(response))
-        {
+            var statusCode = (int)(exception.StatusCode ?? HttpStatusCode.InternalServerError);
             throw new InvalidOperationException(
-                "O Ollama retornou uma resposta vazia para o prompt informado.");
+                $"O Ollama retornou status HTTP {statusCode} ao listar os modelos locais.",
+                exception);
         }
-
-        return response.Trim();
     }
 
+    private IChatClient CreateChatClientAdapter() => new OllamaChatClient(this);
+
+    private string ResolveModel(string? overrideModel = null)
+        => OllamaModelDefaults.Resolve(overrideModel ?? _defaultModel, _environmentVariableReader);
+
+    private static void ValidatePrompt(string prompt)
+    {
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            throw new ArgumentException(
+                "O prompt informado para o Ollama esta vazio.",
+                paramName: nameof(prompt));
+        }
+    }
+
+    private async Task<OllamaHealthcheckResult> CheckHealthWithRetryAsync(CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 2;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseAddress, "api/version"));
+                using var response = await _httpClient
+                    .SendAsync(request, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var payload = await response.Content
+                        .ReadFromJsonAsync<VersionResponse>(JsonOptions, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (string.IsNullOrWhiteSpace(payload?.Version))
+                    {
+                        return OllamaHealthcheckResult.Unhealthy(
+                            "O payload de versao retornado pelo Ollama e invalido.");
+                    }
+
+                    return OllamaHealthcheckResult.Healthy(payload.Version.Trim());
+                }
+
+                if (!IsTransient(response.StatusCode) || attempt == maxAttempts)
+                {
+                    return OllamaHealthcheckResult.Unhealthy(
+                        $"O Ollama retornou status HTTP {(int)response.StatusCode} ao consultar a versao.");
+                }
+            }
+            catch (TaskCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                return OllamaHealthcheckResult.Unhealthy(
+                    "O Ollama excedeu o tempo limite ao consultar a versao.");
+            }
+            catch (HttpRequestException exception)
+            {
+                if (attempt == maxAttempts)
+                {
+                    return OllamaHealthcheckResult.Unhealthy(
+                        $"Nao foi possivel conectar ao Ollama: {exception.Message}");
+                }
+            }
+
+            if (_retryDelay > TimeSpan.Zero)
+            {
+                try
+                {
+                    await Task.Delay(_retryDelay, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+            }
+        }
+
+        return OllamaHealthcheckResult.Unhealthy("O Ollama nao respondeu a verificacao de saude.");
+    }
+
+    private static bool IsTransient(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.RequestTimeout ||
+        (int)statusCode >= 500;
+
+    private sealed record GenerateRequest(
+        [property: JsonPropertyName("model")] string Model,
+        [property: JsonPropertyName("prompt")] string Prompt,
+        [property: JsonPropertyName("stream")] bool Stream);
+
+    private sealed record GenerateChunk(
+        [property: JsonPropertyName("response")] string? Response,
+        [property: JsonPropertyName("done")] bool Done);
+
+    private sealed record TagsResponse(
+        [property: JsonPropertyName("models")] List<TagEntry>? Models);
+
+    private sealed record TagEntry(
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("model")] string? Model);
+
+    private sealed record VersionResponse(
+        [property: JsonPropertyName("version")] string? Version);
 }

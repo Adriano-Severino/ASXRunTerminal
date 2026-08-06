@@ -1,24 +1,19 @@
-using OllamaSharp.Models;
-
 namespace ASXRunTerminal.Core;
 
+/// <summary>
+/// Representa um modelo Ollama instalado localmente.
+/// </summary>
 internal readonly record struct OllamaLocalModel(string Name)
 {
-    public static implicit operator OllamaLocalModel(Model model)
+    public static OllamaLocalModel FromName(string? name)
     {
-        ArgumentNullException.ThrowIfNull(model);
-
-        var resolvedName = string.IsNullOrWhiteSpace(model.Name)
-            ? model.ModelName
-            : model.Name;
-
-        if (string.IsNullOrWhiteSpace(resolvedName))
+        if (string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException(
                 "O payload de modelos retornado pelo Ollama e invalido.",
-                nameof(model));
+                nameof(name));
         }
 
-        return new OllamaLocalModel(resolvedName.Trim());
+        return new OllamaLocalModel(name.Trim());
     }
 }

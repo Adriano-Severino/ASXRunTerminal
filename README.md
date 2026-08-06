@@ -18,6 +18,7 @@ Funcionalidades ja disponiveis:
 - `ask`: executa prompt unico com streaming de resposta;
 - `agent`: inicia modo agente autonomo orientado por objetivo;
 - `chat`: modo interativo no terminal;
+- `code-review`: revisao de codigo com RAG (Retrieval-Augmented Generation) para analise contextual;
 - `doctor`: valida disponibilidade do Ollama;
 - `models`: lista modelos locais do Ollama;
 - `context`: inspeciona resumo do workspace atual;
@@ -160,6 +161,33 @@ asxrun models
 ```bash
 asxrun context
 ```
+
+### Revisao de codigo com RAG
+
+```bash
+asxrun code-review src/Program.cs
+asxrun code-review src/**/*.cs --severity high --focus security
+asxrun code-review src/Program.cs --no-rag
+```
+
+O comando `code-review` usa RAG (Retrieval-Augmented Generation) para revisar codigo com contexto do projeto:
+
+- **Opcoes**:
+  - `--severity=<level>`: Nivel minimo de severidade (critical, high, medium, low, info)
+  - `--focus=<area>`: Foco da revisao (comprehensive, security, performance, maintainability, testing, projectrules)
+  - `--no-rag`: Desativa RAG para revisao simples sem contexto
+  - `--model=<model>`: Modelo Ollama especifico para a revisao
+
+- **Recursos**:
+  - Indexacao inteligente incremental de arquivos
+  - Busca de codigo similar para contexto
+  - Verificacao de conformidade com regras do projeto (implicit operator, test coverage, etc.)
+  - Metricas de qualidade e conformidade
+  - Sugestoes acionaveis por severidade
+
+- **Diferenca vs skill code-reviewer**:
+  - `skill code-reviewer`: Revisao simples baseada em prompt
+  - `code-review`: Revisao avancada com RAG e contexto do projeto
 
 ### Aplicar patch de arquivos com diff
 
@@ -519,7 +547,7 @@ asxrun skills
 Ver detalhes de uma skill:
 
 ```bash
-asxrun skills show code-review
+asxrun skills show code-reviewer
 ```
 
 Criar template de arquivo de skill no diretorio atual:
@@ -537,6 +565,16 @@ Executar prompt com skill:
 
 ```bash
 asxrun skill docs-writer "Escrever guia de onboarding para contribuidores."
+```
+
+Exemplos de skills especializadas:
+
+```bash
+# Revisão abrangente de código seguindo boas práticas do projeto
+asxrun skill code-reviewer "Revise o arquivo ASXRunTerminal/core/SkillCatalog.cs"
+
+# Identificação proativa de bugs e edge cases
+asxrun skill bug-hunter "Analise o arquivo ASXRunTerminal/infra/ToolRuntime.cs em busca de bugs ocultos"
 ```
 
 Formato padrao de arquivo de skill (`SKILL.md`):

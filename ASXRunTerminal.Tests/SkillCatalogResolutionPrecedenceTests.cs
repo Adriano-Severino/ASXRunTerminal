@@ -65,6 +65,34 @@ public sealed class SkillCatalogResolutionPrecedenceTests
     }
 
     [Fact]
+    public void TryFind_WhenCodeReviewerSkillExistsInBuiltIn_ReturnsBuiltInSkill()
+    {
+        var wasFound = SkillCatalog.TryFind(
+            "code-reviewer",
+            out var skill,
+            discoveryDirectories: []);
+
+        Assert.True(wasFound);
+        Assert.Equal("Revisa codigo abrangente seguindo boas praticas do projeto ASXRunTerminal.", skill.Description);
+        Assert.Contains("implicit operator", skill.Instruction);
+        Assert.Contains("AutoMapper", skill.Instruction);
+    }
+
+    [Fact]
+    public void TryFind_WhenBugHunterSkillExistsInBuiltIn_ReturnsBuiltInSkill()
+    {
+        var wasFound = SkillCatalog.TryFind(
+            "bug-hunter",
+            out var skill,
+            discoveryDirectories: []);
+
+        Assert.True(wasFound);
+        Assert.Equal("Identifica proativamente bugs e edge cases que podem ter escapado no desenvolvimento.", skill.Description);
+        Assert.Contains("edge cases", skill.Instruction);
+        Assert.Contains("vulnerabilidades", skill.Instruction);
+    }
+
+    [Fact]
     public void List_WhenNamesCollide_AppliesPrecedenceAndReturnsUniqueNames()
     {
         var root = CreateTemporaryDirectory();

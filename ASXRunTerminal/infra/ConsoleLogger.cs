@@ -35,6 +35,16 @@ internal static class ConsoleLogger
         Write(Console.Out, "INFO", message, isError: false);
     }
 
+    public static void Warning(string message)
+    {
+        Write(Console.Out, "WARNING", message, isError: false);
+    }
+
+    public static void Success(string message)
+    {
+        Write(Console.Out, "SUCCESS", message, isError: false);
+    }
+
     public static void Error(string message)
     {
         Write(Console.Error, "ERROR", message, isError: true);

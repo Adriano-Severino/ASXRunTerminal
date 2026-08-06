@@ -9,6 +9,7 @@ internal interface IOllamaHttpClient
 
     IAsyncEnumerable<string> GenerateStreamAsync(string prompt, CancellationToken cancellationToken = default);
     Task<string> GenerateAsync(string prompt, CancellationToken cancellationToken = default);
+    Task<string> GenerateAsync(string prompt, string? model, CancellationToken cancellationToken = default);
     Task<OllamaHealthcheckResult> CheckHealthAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<OllamaLocalModel>> ListLocalModelsAsync(CancellationToken cancellationToken = default);
 }

@@ -10,13 +10,15 @@ Documentar como o ASXRunTerminal organiza extensoes (tools, MCP e skills) e como
 - Contexto de workspace com deteccao de raiz, mapeamento de arquivos e indice em memoria.
 - Persistencia operacional local (config, checkpoints, auditoria de patch, historico e catalogo MCP).
 - `ask/chat` ainda nao executam tool calls MCP durante a geracao; isso permanece como evolucao da `TASK 6.2.5`.
+- **Subagente code-reviewer com RAG**: Revisao de codigo contextual usando embeddings, SQLite vector store e Microsoft Agent Framework.
 
 ## Mapa de Componentes
 | Camada | Responsabilidade | Principais arquivos |
 | --- | --- | --- |
 | `Program` | Orquestra parse, dispatch, resiliencia, checkpoint e execucao de comandos | `ASXRunTerminal/Program.cs` |
 | `core` | Contratos e regras de negocio (tool runtime, skills, contexto de workspace, patch) | `ASXRunTerminal/core/*.cs` |
-| `infra` | Adaptadores de execucao (shell, MCP stdio/http/sse, descoberta/validacao MCP, Ollama HTTP) | `ASXRunTerminal/infra/*.cs` |
+| `infra` | Adaptadores de execucao (shell, MCP stdio/http/sse, descoberta/validacao MCP, Ollama HTTP, RAG) | `ASXRunTerminal/infra/*.cs` |
+| `subagents` | Subagentes especializados (code-reviewer com RAG) | `ASXRunTerminal/subagents/*.cs` |
 | `config` | Persistencia e validacao de arquivos locais (`~/.asxrun` e `.asxrun` no workspace) | `ASXRunTerminal/config/*.cs` |
 
 ## Fluxo 1: Ferramentas Locais (Plugin Runtime)
@@ -55,6 +57,32 @@ Documentar como o ASXRunTerminal organiza extensoes (tools, MCP e skills) e como
 4. `context` exibe resumo operacional (`entry count`, truncamento, limites aplicados, timestamp de indexacao).
 5. `patch` usa `WorkspacePatchEngine` + `WorkspaceFileOperations` com politica opcional de permissoes (`.asxrun/workspace-permissions.json`) e auditoria local (`~/.asxrun/patch-audit`).
 
+## Fluxo 5: Code-Reviewer Subagent com RAG (`code-review`)
+1. `code-review` recebe lista de arquivos e opcoes (severity, focus, use-rag).
+2. `CodeReviewerSubagent` inicializa com `OllamaEmbeddingGenerator`, `SqliteVectorStore` e `IChatClient` via DI.
+3. Se `use-rag=true`, executa indexacao incremental:
+   - Verifica se arquivos ja estao indexados via `IsDocumentIndexedAsync`
+   - Se nao indexado ou `force-reindex`, le conteudo e gera embeddings via `OllamaEmbeddingGenerator`
+   - Armazena em `SqliteVectorStore` (SQLite em `~/.asxrun/vector-store.db`)
+4. Para revisao com contexto RAG:
+   - Gera embedding para query de busca (ex: "best practices patterns")
+   - Busca codigo similar via `SearchSimilarAsync` (cosine similarity)
+   - Filtra resultados por `SimilarityThreshold` (default: 0.7)
+   - Monta contexto com top N resultados (default: 10)
+5. Construtor de prompt inclui:
+   - Instrucoes de sistema para revisao de codigo
+   - Regras especificas do projeto ASXRunTerminal (implicit operator, test coverage, etc.)
+   - Foco da revisao (security, performance, maintainability, etc.)
+   - Contexto RAG com codigo similar
+   - Arquivos alvo da revisao
+   - Formato de saida estruturado
+6. Executa revisao via `IChatClient` com modelo Ollama selecionado.
+7. Parser converte resposta em `CodeReviewResult` estruturado:
+   - `CodeReviewIssue` com severidade, categoria, sugestoes
+   - `CodeReviewMetrics` com scores de qualidade e conformidade
+   - `RagContextInfo` com metadados das operacoes RAG
+8. Exibe resultados com formatação colorida por severidade e metricas de qualidade.
+
 ## Arquivos de Operacao
 - Usuario (`~/.asxrun`): `config`, `history`, `mcp-servers.json`, `execution-checkpoints`, `patch-audit`, `agent-audit`.
 - Workspace (`<raiz>/.asxrun`): `workspace-permissions.json`, `shell-command-policy.json`, `skills/**/*.md`.
@@ -76,3 +104,10 @@ Documentar como o ASXRunTerminal organiza extensoes (tools, MCP e skills) e como
 - `ASXRunTerminal/core/WorkspaceContextFileIndex.cs`
 - `ASXRunTerminal/infra/McpToolDiscovery.cs`
 - `ASXRunTerminal/config/McpServerCatalogFile.cs`
+- `ASXRunTerminal/subagents/CodeReviewerSubagent.cs`
+- `ASXRunTerminal/infra/OllamaEmbeddingGenerator.cs`
+- `ASXRunTerminal/infra/SqliteVectorStore.cs`
+- `ASXRunTerminal/infra/VectorStoreConfiguration.cs`
+
+## Documentacao Adicional
+- Arquitetura detalhada do subagente code-reviewer: `docs/architecture/code-reviewer-subagent.md`

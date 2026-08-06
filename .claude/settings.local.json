@@ -2,7 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(dotnet test:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(dotnet build *)",
+      "Bash(dotnet --version)",
+      "Bash(dotnet restore *)",
+      "WebFetch(domain:www.nuget.org)",
+      "WebFetch(domain:api.nuget.org)",
+      "Bash(curl -s \"https://api.nuget.org/v3-flatcontainer/microsoft.extensions.vectordata/index.json\")",
+      "Bash(curl -s \"https://azuresearch-usnc.nuget.org/query?q=Microsoft.Extensions.VectorData&take=10\")",
+      "Bash(python -c \"import sys, json; d = json.load\\(sys.stdin\\); [print\\(p['id'], p['version']\\) for p in d.get\\('data', []\\)]\")",
+      "Bash(curl -s \"https://azuresearch-usnc.nuget.org/query?q=Microsoft.Extensions.VectorData&take=20\")",
+      "Bash(curl -s \"https://azuresearch-usnc.nuget.org/query?q=Microsoft.Extensions.AI.Ollama&take=10\")",
+      "Bash(curl -s \"https://azuresearch-usnc.nuget.org/query?q=Microsoft.Agents.AI.Ollama&take=10\")"
     ]
   }
 }
