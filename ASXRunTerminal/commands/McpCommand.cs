@@ -1,6 +1,7 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Config;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -17,15 +18,18 @@ internal sealed class McpCommand : CommandBase
     private readonly Func<IReadOnlyList<McpServerDefinition>> _mcpServersLoader;
     private readonly Action<IReadOnlyList<McpServerDefinition>> _mcpServersSaver;
     private readonly Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? _mcpServerTester;
+    private readonly ILogger<McpCommand> _logger;
 
     public McpCommand(
         Func<IReadOnlyList<McpServerDefinition>> mcpServersLoader,
         Action<IReadOnlyList<McpServerDefinition>> mcpServersSaver,
-        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null)
+        Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null,
+        ILogger<McpCommand>? logger = null)
     {
         _mcpServersLoader = mcpServersLoader;
         _mcpServersSaver = mcpServersSaver;
         _mcpServerTester = mcpServerTester;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<McpCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -63,6 +67,7 @@ internal sealed class McpCommand : CommandBase
         var arguments = parseResult.Parameters.TryGetValue("arguments", out var argsValue) && argsValue is string[] argArray ? argArray : Array.Empty<string>();
 
         ConsoleLogger.Info($"MCP command: {action}, Arguments: {arguments.Length}");
+        _logger.LogInformation("MCP command: {Action}, Arguments: {ArgumentCount}", action, arguments.Length);
 
         // For now, delegate to the existing Program.cs MCP methods
         // This will be refactored further in subsequent steps

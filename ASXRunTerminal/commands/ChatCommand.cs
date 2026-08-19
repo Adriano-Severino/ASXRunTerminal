@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -19,19 +20,22 @@ internal sealed class ChatCommand : CommandBase
     private readonly IToolRuntime _toolRuntime;
     private readonly Func<CancellationTokenSource, Action, IDisposable> _cancelSignalRegistration;
     private readonly Func<IReadOnlyList<PromptHistoryEntry>> _historyLoader;
+    private readonly ILogger<ChatCommand> _logger;
 
     public ChatCommand(
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
         IToolRuntime toolRuntime,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
-        Func<IReadOnlyList<PromptHistoryEntry>> historyLoader)
+        Func<IReadOnlyList<PromptHistoryEntry>> historyLoader,
+        ILogger<ChatCommand>? logger = null)
     {
         _promptExecutor = promptExecutor;
         _modelsExecutor = modelsExecutor;
         _toolRuntime = toolRuntime;
         _cancelSignalRegistration = cancelSignalRegistration;
         _historyLoader = historyLoader;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ChatCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -97,6 +101,8 @@ internal sealed class ChatCommand : CommandBase
         // For now, we'll call the existing static method from Program.cs
         // This will be refactored in subsequent steps
         ConsoleLogger.Info("Modo interativo (implementacao parcial - use Program.cs por enquanto)");
+        // Note: This is a static method, so we can't use _logger here
+        // When this method is refactored to be non-static, it should use structured logging
         return (int)CliExitCode.Success;
     }
 

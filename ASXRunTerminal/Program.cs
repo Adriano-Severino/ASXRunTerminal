@@ -5,6 +5,7 @@ using ASXRunTerminal.Subagents;
 using ASXRunTerminal.Commands;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -22,6 +23,7 @@ internal static partial class Program
 {
     private static readonly IHost RagHost = RagService.Initialize(Config.LoggingConfiguration.Default);
     private static readonly IServiceProvider ServiceProvider = DependencyInjection.CreateServiceProvider(Config.LoggingConfiguration.Default);
+    private static readonly ILogger Logger = ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("ASXRunTerminal.Program");
 
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
@@ -823,7 +825,7 @@ internal static partial class Program
                     parseResult.SelectedModel);
             }
 
-            ConsoleLogger.Info("ASXRunTerminal CLI inicializado.");
+            Logger.LogInformation("ASXRunTerminal CLI inicializado.");
             return (int)CliExitCode.Success;
         }
         catch (Exception ex)
@@ -2932,6 +2934,7 @@ internal static partial class Program
         ArgumentNullException.ThrowIfNull(executionCheckpointAppender);
 
         ConsoleLogger.Info("Executando comando unico 'ask'.");
+        Logger.LogInformation("Executando comando unico 'ask'.");
         var checkpointContext = CreatePromptCheckpointContext(
             command: "ask",
             prompt: prompt,
@@ -2971,6 +2974,7 @@ internal static partial class Program
         ArgumentNullException.ThrowIfNull(agentAuditAppender);
 
         ConsoleLogger.Info("Iniciando modo agente autonomo por objetivo.");
+        Logger.LogInformation("Iniciando modo agente autonomo por objetivo.");
         var sessionBudget = new AgentSessionBudget(
             MaxSteps: maxSteps ?? AgentAutonomousMaxIterations,
             MaxTime: maxTime,
@@ -2979,6 +2983,9 @@ internal static partial class Program
             $"Orcamento da sessao do agente: max_steps={sessionBudget.MaxSteps}, " +
             $"max_time={FormatOptionalBudgetDuration(sessionBudget.MaxTime)}, " +
             $"max_cost={FormatOptionalBudgetValue(sessionBudget.MaxCost)}.");
+        Logger.LogInformation(
+            "Orcamento da sessao do agente: max_steps={MaxSteps}, max_time={MaxTime}, max_cost={MaxCost}",
+            sessionBudget.MaxSteps, FormatOptionalBudgetDuration(sessionBudget.MaxTime), FormatOptionalBudgetValue(sessionBudget.MaxCost));
         var normalizedResumeLoopState = NormalizeAgentAutonomousLoopState(
             resumeLoopState ?? AgentAutonomousLoopState.Initial,
             sessionBudget.MaxSteps);
@@ -2986,15 +2993,22 @@ internal static partial class Program
         {
             ConsoleLogger.Info(
                 $"Retomando loop autonomo a partir da iteracao {normalizedResumeLoopState.NextIteration}/{sessionBudget.MaxSteps}.");
+            Logger.LogInformation(
+                "Retomando loop autonomo a partir da iteracao {NextIteration}/{MaxSteps}",
+                normalizedResumeLoopState.NextIteration, sessionBudget.MaxSteps);
         }
 
         ConsoleLogger.Info(
             "Coletando contexto de engenharia do projeto antes do ciclo autonomo.");
+        Logger.LogInformation("Coletando contexto de engenharia do projeto antes do ciclo autonomo.");
         var projectContext = LoadAgentProjectContextSnapshot();
         ConsoleLogger.Info(
             $"Contexto de engenharia carregado: codigo={projectContext.CodeFileCount}, " +
             $"testes={projectContext.TestFileCount}, docs={projectContext.DocumentationFileCount}, " +
             $"git={projectContext.GitHistorySummary}.");
+        Logger.LogInformation(
+            "Contexto de engenharia carregado: codigo={CodeFileCount}, testes={TestFileCount}, docs={DocumentationFileCount}, git={GitHistorySummary}",
+            projectContext.CodeFileCount, projectContext.TestFileCount, projectContext.DocumentationFileCount, projectContext.GitHistorySummary);
 
         if (!TryLoadAgentAutonomyPolicy(
             projectContext.WorkspaceRootDirectory,
@@ -3006,9 +3020,13 @@ internal static partial class Program
         }
 
         ConsoleLogger.Info($"Nivel de autonomia do projeto: {autonomyPolicy.LevelName}.");
+        Logger.LogInformation("Nivel de autonomia do projeto: {LevelName}", autonomyPolicy.LevelName);
         ConsoleLogger.Info(
             "Aprovacao explicita para operacoes sensiveis/destrutivas no modo agente: " +
             $"{(hasExplicitSensitiveOperationApproval ? "habilitada" : "nao habilitada")}.");
+        Logger.LogInformation(
+            "Aprovacao explicita para operacoes sensiveis/destrutivas no modo agente: {HasApproval}",
+            hasExplicitSensitiveOperationApproval ? "habilitada" : "nao habilitada");
         var agentToolRuntime = new AgentGovernedToolRuntime(
             toolRuntime,
             hasExplicitSensitiveOperationApproval,
@@ -3047,6 +3065,7 @@ internal static partial class Program
         if (!string.IsNullOrWhiteSpace(auditPath))
         {
             ConsoleLogger.Info($"Trilha de auditoria do agente: {auditPath}");
+            Logger.LogInformation("Trilha de auditoria do agente: {AuditPath}", auditPath);
         }
 
         var stableStateStore = new AgentStableStateStore();
@@ -3071,6 +3090,9 @@ internal static partial class Program
 
         ConsoleLogger.Info(
             $"Estado estavel inicial capturado para rollback automatico: {stableStateSnapshot.FileCount} arquivo(s).");
+        Logger.LogInformation(
+            "Estado estavel inicial capturado para rollback automatico: {FileCount} arquivo(s)",
+            stableStateSnapshot.FileCount);
         AppendAgentAuditEntry(
             auditContext,
             iteration: 0,
@@ -3196,11 +3218,14 @@ internal static partial class Program
 
         var report = AgentSuccessBenchmark.Evaluate(auditEntries);
         ConsoleLogger.Info("Benchmark de sucesso do modo agente autonomo.");
+        Logger.LogInformation("Benchmark de sucesso do modo agente autonomo.");
         Console.WriteLine(report.ToSummary(minimumAutonomousSuccessRatePercent));
 
         if (report.TotalSessions == 0)
         {
             ConsoleLogger.Info(
+                "Nenhuma sessao auditada do agente foi encontrada para calcular o benchmark.");
+            Logger.LogInformation(
                 "Nenhuma sessao auditada do agente foi encontrada para calcular o benchmark.");
             return (int)CliExitCode.Success;
         }
@@ -3289,6 +3314,7 @@ internal static partial class Program
 
             ConsoleLogger.Info(
                 $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase plan.");
+            Logger.LogInformation("Ciclo autonomo {Iteration}/{MaxSteps}: fase plan.", iteration, sessionBudget.MaxSteps);
             var planPrompt = BuildAgentPlanPhasePrompt(
                 executionPlan,
                 iteration,
@@ -3342,6 +3368,7 @@ internal static partial class Program
 
             ConsoleLogger.Info(
                 $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase execute.");
+            Logger.LogInformation("Ciclo autonomo {Iteration}/{MaxSteps}: fase execute.", iteration, sessionBudget.MaxSteps);
             var executePrompt = BuildAgentExecutePhasePrompt(
                 executionPlan,
                 iteration,
@@ -3375,6 +3402,7 @@ internal static partial class Program
             var executeEvidence = ParseAgentCodeChangeEvidence(
                 executeResult.StreamMetrics.ResponseText);
             ConsoleLogger.Info(BuildAgentCodeChangeEvidenceLogMessage(executeEvidence));
+            Logger.LogInformation(BuildAgentCodeChangeEvidenceLogMessage(executeEvidence));
             AppendAgentChangeAuditEntry(
                 auditContext,
                 iteration,
@@ -3472,6 +3500,7 @@ internal static partial class Program
 
             ConsoleLogger.Info(
                 $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase verify.");
+            Logger.LogInformation("Ciclo autonomo {Iteration}/{MaxSteps}: fase verify.", iteration, sessionBudget.MaxSteps);
             var verifyPrompt = BuildAgentVerifyPhasePrompt(
                 executionPlan,
                 iteration,
@@ -3533,6 +3562,8 @@ internal static partial class Program
             {
                 ConsoleLogger.Info(
                     "Verificacao marcou status 'done', mas as evidencias de diff/justificativa por mudanca estao incompletas. Forcando refine.");
+                Logger.LogInformation(
+                    "Verificacao marcou status 'done', mas as evidencias de diff/justificativa por mudanca estao incompletas. Forcando refine.");
                 AppendAgentAuditEntry(
                     auditContext,
                     iteration,
@@ -3547,6 +3578,8 @@ internal static partial class Program
             else if (verificationDecision.IsConcluded && validationReport.HasFailures)
             {
                 ConsoleLogger.Info(
+                    "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.");
+                Logger.LogInformation(
                     "Verificacao marcou status 'done', mas a validacao automatica pos-mudanca falhou. Forcando refine.");
                 AppendAgentAuditEntry(
                     auditContext,
@@ -3565,6 +3598,7 @@ internal static partial class Program
             {
                 ConsoleLogger.Info(
                     $"Ciclo autonomo {iteration}/{sessionBudget.MaxSteps}: fase auto-review.");
+                Logger.LogInformation("Ciclo autonomo {Iteration}/{MaxSteps}: fase auto-review.", iteration, sessionBudget.MaxSteps);
                 var selfReviewPrompt = BuildAgentSelfReviewPhasePrompt(
                     executionPlan,
                     iteration,
@@ -3633,23 +3667,26 @@ internal static partial class Program
                 {
                     ConsoleLogger.Info(
                         "Auto-review aprovou a propria mudanca antes da conclusao.");
+                    Logger.LogInformation(
+                        "Auto-review aprovou a propria mudanca antes da conclusao.");
                 }
                 else
                 {
                     ConsoleLogger.Info(
                         $"Auto-review marcou status '{selfReviewDecision.Status}'. Iniciando fase refine.");
+                    Logger.LogInformation(
+                        "Auto-review marcou status '{Status}'. Iniciando fase refine.",
+                        selfReviewDecision.Status);
                     verificationDecision = AgentVerificationDecision.NeedsRefine(AgentVerificationStatusRefine);
                 }
             }
-
-            if (verificationDecision.IsConcluded)
+            else if (verificationDecision.IsConcluded)
             {
-                Console.WriteLine(BuildAgentDeliverySummary(
-                    latestExecutionOutput,
-                    validationReport,
-                    previousVerificationOutput));
                 ConsoleLogger.Info(
                     $"Verificacao marcou status '{verificationDecision.Status}'. Objetivo concluido.");
+                Logger.LogInformation(
+                    "Verificacao marcou status '{Status}'. Objetivo concluido.",
+                    verificationDecision.Status);
                 AppendAgentAuditEntry(
                     auditContext,
                     iteration,
@@ -3675,6 +3712,9 @@ internal static partial class Program
 
             ConsoleLogger.Info(
                 $"Verificacao marcou status '{verificationDecision.Status}'. Iniciando fase refine.");
+            Logger.LogInformation(
+                "Verificacao marcou status '{Status}'. Iniciando fase refine.",
+                verificationDecision.Status);
             var refinePrompt = BuildAgentRefinePhasePrompt(
                 executionPlan,
                 iteration,
@@ -3763,6 +3803,9 @@ internal static partial class Program
             {
                 ConsoleLogger.Info(
                     $"Validacao automatica pos-mudanca bloqueada pelo nivel de autonomia '{autonomyPolicy.LevelName}'.");
+                Logger.LogInformation(
+                    "Validacao automatica pos-mudanca bloqueada pelo nivel de autonomia '{LevelName}'.",
+                    autonomyPolicy.LevelName);
                 AppendAgentAuditEntry(
                     auditContext,
                     iteration,
@@ -3790,6 +3833,8 @@ internal static partial class Program
         }
 
         ConsoleLogger.Info(
+            "Validacao automatica pos-mudanca: bloco de alteracoes detectado; executando build, test, lint e gate de cobertura quando disponivel.");
+        Logger.LogInformation(
             "Validacao automatica pos-mudanca: bloco de alteracoes detectado; executando build, test, lint e gate de cobertura quando disponivel.");
 
         var runner = new AgentValidationCommandRunner(toolRuntime);
@@ -3839,6 +3884,9 @@ internal static partial class Program
             "Cobertura minima de testes nao atendida. " +
             coverageEvaluation.ToSummary();
         ConsoleLogger.Info(message);
+        Logger.LogInformation(
+            "Cobertura minima de testes nao atendida. {Summary}",
+            coverageEvaluation.ToSummary());
         var results = validationReport.Results
             .Concat(
             [
@@ -3891,6 +3939,9 @@ internal static partial class Program
             $"Reexecute o comando agent com '{AgentApproveSensitiveFlag}' para permitir delete, move ou rename; " +
             $"mudancas bloqueadas: {destructiveChanges}.";
         ConsoleLogger.Info(message);
+        Logger.LogInformation(
+            "Operacao destrutiva declarada na fase execute sem aprovacao explicita da sessao. Reexecute o comando agent com '{Flag}' para permitir delete, move ou rename; mudancas bloqueadas: {DestructiveChanges}",
+            AgentApproveSensitiveFlag, destructiveChanges);
         AppendAgentAuditEntry(
             auditContext,
             iteration,

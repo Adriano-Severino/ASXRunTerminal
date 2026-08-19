@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -17,15 +18,18 @@ internal sealed class SkillCommand : CommandBase
     private readonly Func<string, string?, CancellationToken, IAsyncEnumerable<string>> _promptExecutor;
     private readonly Func<CancellationTokenSource, Action, IDisposable> _cancelSignalRegistration;
     private readonly Action<ExecutionSessionCheckpoint> _executionCheckpointAppender;
+    private readonly ILogger<SkillCommand> _logger;
 
     public SkillCommand(
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
-        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
+        ILogger<SkillCommand>? logger = null)
     {
         _promptExecutor = promptExecutor;
         _cancelSignalRegistration = cancelSignalRegistration;
         _executionCheckpointAppender = executionCheckpointAppender;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SkillCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -90,7 +94,9 @@ internal sealed class SkillCommand : CommandBase
         var model = GetStringParameter(parseResult.Parameters, "model") ?? string.Empty;
 
         ConsoleLogger.Info($"Skill command: {skillName}, Prompt: {prompt}, Model: {model}");
+        _logger.LogInformation("Skill command: {SkillName}, Prompt: {Prompt}, Model: {Model}", skillName, prompt, model);
         ConsoleLogger.Info("Skill (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Skill (implementacao parcial - use Program.cs por enquanto)");
 
         // For now, delegate to the existing Program.cs skill methods
         // This will be refactored further in subsequent steps

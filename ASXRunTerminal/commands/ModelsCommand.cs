@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -14,10 +15,14 @@ internal sealed class ModelsCommand : CommandBase
     public override string Description => "Lista os modelos locais do Ollama.";
 
     private readonly Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> _modelsExecutor;
+    private readonly ILogger<ModelsCommand> _logger;
 
-    public ModelsCommand(Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor)
+    public ModelsCommand(
+        Func<CancellationToken, Task<IReadOnlyList<OllamaLocalModel>>> modelsExecutor,
+        ILogger<ModelsCommand>? logger = null)
     {
         _modelsExecutor = modelsExecutor;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ModelsCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -45,15 +50,18 @@ internal sealed class ModelsCommand : CommandBase
         }
 
         ConsoleLogger.Info("Listando modelos locais do Ollama...");
+        _logger.LogInformation("Listando modelos locais do Ollama...");
         var models = await _modelsExecutor(cancellationToken);
 
         if (models.Count == 0)
         {
             ConsoleLogger.Warning("Nenhum modelo local encontrado. Use 'ollama pull <modelo>' para baixar um modelo.");
+            _logger.LogWarning("Nenhum modelo local encontrado. Use 'ollama pull <modelo>' para baixar um modelo.");
             return (int)CliExitCode.Success;
         }
 
         ConsoleLogger.Success($"Encontrados {models.Count} modelo(s) local(is):");
+        _logger.LogInformation("Encontrados {Count} modelo(s) local(is)", models.Count);
         foreach (var model in models)
         {
             Console.WriteLine($"  - {model.Name}");

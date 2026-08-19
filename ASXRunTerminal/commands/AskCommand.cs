@@ -1,6 +1,7 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Config;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -18,15 +19,18 @@ internal sealed class AskCommand : CommandBase
     private readonly Func<string, string?, CancellationToken, IAsyncEnumerable<string>> _promptExecutor;
     private readonly Func<CancellationTokenSource, Action, IDisposable> _cancelSignalRegistration;
     private readonly Action<ExecutionSessionCheckpoint> _executionCheckpointAppender;
+    private readonly ILogger<AskCommand> _logger;
 
     public AskCommand(
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
-        Action<ExecutionSessionCheckpoint> executionCheckpointAppender)
+        Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
+        ILogger<AskCommand>? logger = null)
     {
         _promptExecutor = promptExecutor;
         _cancelSignalRegistration = cancelSignalRegistration;
         _executionCheckpointAppender = executionCheckpointAppender;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<AskCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -82,6 +86,7 @@ internal sealed class AskCommand : CommandBase
         ArgumentNullException.ThrowIfNull(prompt);
 
         ConsoleLogger.Info("Executando comando unico 'ask'.");
+        _logger.LogInformation("Executando comando unico 'ask'.");
         var checkpointContext = CreatePromptCheckpointContext(
             command: "ask",
             prompt: prompt,
@@ -208,6 +213,8 @@ internal sealed class AskCommand : CommandBase
         {
             wasCancelled = true;
             ConsoleLogger.Info("Execucao cancelada pelo usuario.");
+            // Note: This is a static method, so we can't use _logger here
+            // When this method is refactored to be non-static, it should use structured logging
         });
 
         try
@@ -229,6 +236,8 @@ internal sealed class AskCommand : CommandBase
         catch (OperationCanceledException) when (cts.Token.IsCancellationRequested)
         {
             ConsoleLogger.Info("Execucao cancelada pelo usuario.");
+            // Note: This is a static method, so we can't use _logger here
+            // When this method is refactored to be non-static, it should use structured logging
             wasCancelled = true;
         }
 

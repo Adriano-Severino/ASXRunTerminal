@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -9,6 +10,12 @@ namespace ASXRunTerminal.Commands;
 internal sealed class SkillsCommand : CommandBase
 {
     private const string CliName = "asxrun";
+    private readonly ILogger<SkillsCommand> _logger;
+
+    public SkillsCommand(ILogger<SkillsCommand>? logger = null)
+    {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SkillsCommand>.Instance;
+    }
 
     public override string Name => "skills";
     public override string Description => "Lista as skills disponiveis.";
@@ -52,7 +59,9 @@ internal sealed class SkillsCommand : CommandBase
         var arguments = parseResult.Parameters.TryGetValue("arguments", out var argsValue) && argsValue is string[] argArray ? argArray : Array.Empty<string>();
 
         ConsoleLogger.Info($"Skills command: {action}, Arguments: {arguments.Length}");
+        _logger.LogInformation("Skills command: {Action}, Arguments: {ArgumentCount}", action, arguments.Length);
         ConsoleLogger.Info("Skills (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Skills (implementacao parcial - use Program.cs por enquanto)");
 
         // For now, delegate to the existing Program.cs skills methods
         // This will be refactored further in subsequent steps

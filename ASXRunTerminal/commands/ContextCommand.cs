@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -9,6 +10,12 @@ namespace ASXRunTerminal.Commands;
 internal sealed class ContextCommand : CommandBase
 {
     private const string CliName = "asxrun";
+    private readonly ILogger<ContextCommand> _logger;
+
+    public ContextCommand(ILogger<ContextCommand>? logger = null)
+    {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ContextCommand>.Instance;
+    }
 
     public override string Name => "context";
     public override string Description => "Inspeciona o resumo do workspace atual.";
@@ -38,6 +45,7 @@ internal sealed class ContextCommand : CommandBase
         }
 
         ConsoleLogger.Info("Inspecionando contexto do workspace...");
+        _logger.LogInformation("Inspecionando contexto do workspace...");
 
         try
         {
@@ -47,6 +55,9 @@ internal sealed class ContextCommand : CommandBase
             ConsoleLogger.Success($"Diretorio atual: {currentDirectory}");
             ConsoleLogger.Success($"Raiz do workspace: {workspaceRoot.DirectoryPath}");
             ConsoleLogger.Success($"Tipo de workspace: {workspaceRoot.Kind}");
+            _logger.LogInformation("Diretorio atual: {CurrentDirectory}", currentDirectory);
+            _logger.LogInformation("Raiz do workspace: {WorkspaceRoot}", workspaceRoot.DirectoryPath);
+            _logger.LogInformation("Tipo de workspace: {WorkspaceKind}", workspaceRoot.Kind);
 
             // Get file count in workspace
             var fileCount = Directory.EnumerateFiles(workspaceRoot.DirectoryPath, "*", new EnumerationOptions
@@ -56,6 +67,7 @@ internal sealed class ContextCommand : CommandBase
             }).Count();
 
             ConsoleLogger.Success($"Total de arquivos: {fileCount}");
+            _logger.LogInformation("Total de arquivos: {FileCount}", fileCount);
 
             return Task.FromResult((int)CliExitCode.Success);
         }

@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -9,6 +10,12 @@ namespace ASXRunTerminal.Commands;
 internal sealed class HelpCommand : CommandBase
 {
     private const string CliName = "asxrun";
+    private readonly ILogger<HelpCommand> _logger;
+
+    public HelpCommand(ILogger<HelpCommand>? logger = null)
+    {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<HelpCommand>.Instance;
+    }
 
     public override string Name => "help";
     public override string Description => "Exibe informacoes de ajuda.";

@@ -1,6 +1,7 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using System.Globalization;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -28,19 +29,22 @@ internal sealed class AgentCommand : CommandBase
     private readonly Action<ExecutionSessionCheckpoint> _executionCheckpointAppender;
     private readonly IToolRuntime _toolRuntime;
     private readonly Func<AgentAuditEntry, string> _agentAuditAppender;
+    private readonly ILogger<AgentCommand> _logger;
 
     public AgentCommand(
         Func<string, string?, CancellationToken, IAsyncEnumerable<string>> promptExecutor,
         Func<CancellationTokenSource, Action, IDisposable> cancelSignalRegistration,
         Action<ExecutionSessionCheckpoint> executionCheckpointAppender,
         IToolRuntime toolRuntime,
-        Func<AgentAuditEntry, string> agentAuditAppender)
+        Func<AgentAuditEntry, string> agentAuditAppender,
+        ILogger<AgentCommand>? logger = null)
     {
         _promptExecutor = promptExecutor;
         _cancelSignalRegistration = cancelSignalRegistration;
         _executionCheckpointAppender = executionCheckpointAppender;
         _toolRuntime = toolRuntime;
         _agentAuditAppender = agentAuditAppender;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<AgentCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -124,12 +128,15 @@ internal sealed class AgentCommand : CommandBase
         var hasExplicitSensitiveOperationApproval = GetBoolParameter(parseResult.Parameters, "hasExplicitSensitiveOperationApproval");
 
         ConsoleLogger.Info("Modo agente (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Modo agente (implementacao parcial - use Program.cs por enquanto)");
         return Task.FromResult((int)CliExitCode.Success);
     }
 
     private static Task<int> ExecuteAgentBenchmarkAsync(CommandParseResult parseResult, CancellationToken cancellationToken)
     {
         ConsoleLogger.Info("Modo agente benchmark (implementacao parcial - use Program.cs por enquanto)");
+        // Note: This is a static method, so we can't use _logger here
+        // When this method is refactored to be non-static, it should use structured logging
         return Task.FromResult((int)CliExitCode.Success);
     }
 

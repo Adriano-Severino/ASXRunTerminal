@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -9,6 +10,12 @@ namespace ASXRunTerminal.Commands;
 internal sealed class PatchCommand : CommandBase
 {
     private const string CliName = "asxrun";
+    private readonly ILogger<PatchCommand> _logger;
+
+    public PatchCommand(ILogger<PatchCommand>? logger = null)
+    {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<PatchCommand>.Instance;
+    }
 
     public override string Name => "patch";
     public override string Description => "Aplica mudancas de arquivo por JSON e exibe diff unificado.";
@@ -75,7 +82,9 @@ internal sealed class PatchCommand : CommandBase
         var dryRun = GetBoolParameter(parseResult.Parameters, "dryRun");
 
         ConsoleLogger.Info($"Patch command: {patchFilePath}, Dry-run: {dryRun}");
+        _logger.LogInformation("Patch command: {PatchFilePath}, Dry-run: {DryRun}", patchFilePath, dryRun);
         ConsoleLogger.Info("Patch (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Patch (implementacao parcial - use Program.cs por enquanto)");
 
         return Task.FromResult((int)CliExitCode.Success);
     }

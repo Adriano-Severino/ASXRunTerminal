@@ -1,6 +1,8 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Config;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace ASXRunTerminal.Commands;
 
@@ -11,6 +13,7 @@ internal sealed class CommandRegistry
 {
     private readonly Dictionary<string, ICommand> _commands;
     private readonly ICommand _defaultCommand;
+    private readonly ILogger<CommandRegistry> _logger;
 
     public CommandRegistry(
         AskCommand askCommand,
@@ -28,7 +31,8 @@ internal sealed class CommandRegistry
         SkillsCommand skillsCommand,
         SkillCommand skillCommand,
         HelpCommand helpCommand,
-        VersionCommand versionCommand)
+        VersionCommand versionCommand,
+        ILogger<CommandRegistry>? logger = null)
     {
         _commands = new Dictionary<string, ICommand>(StringComparer.OrdinalIgnoreCase)
         {
@@ -52,6 +56,7 @@ internal sealed class CommandRegistry
 
         // Default to chat mode when no arguments provided
         _defaultCommand = chatCommand;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<CommandRegistry>.Instance;
     }
 
     /// <summary>
@@ -123,6 +128,7 @@ internal sealed class CommandRegistry
 
         // Unknown command - show help
         ConsoleLogger.Error($"Comando desconhecido: {commandName}");
+        _logger.LogError("Comando desconhecido: {CommandName}", commandName);
         var helpParseResult = _commands["help"].ParseArguments(["--help"]);
         return await _commands["help"].ExecuteAsync(helpParseResult, cancellationToken);
     }
@@ -145,7 +151,8 @@ internal sealed class CommandRegistry
         Func<McpServerDefinition, CancellationToken, Task<McpServerTestResult>>? mcpServerTester = null,
         Func<UserRuntimeConfig>? configLoader = null,
         Action<UserRuntimeConfig>? configSaver = null,
-        Func<IReadOnlyList<ExecutionSessionCheckpoint>>? executionCheckpointLoader = null)
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>>? executionCheckpointLoader = null,
+        IServiceProvider? serviceProvider = null)
     {
         ArgumentNullException.ThrowIfNull(promptExecutor);
         ArgumentNullException.ThrowIfNull(healthcheckExecutor);
@@ -163,22 +170,28 @@ internal sealed class CommandRegistry
         var configSaverSafe = configSaver ?? (config => UserConfigFile.Save(config));
         var executionCheckpointLoaderSafe = executionCheckpointLoader ?? (() => ExecutionCheckpointFile.Load());
 
-        var askCommand = new AskCommand(promptExecutor, cancelSignalRegistration, executionCheckpointAppender);
-        var chatCommand = new ChatCommand(promptExecutor, modelsExecutor, toolRuntime, cancelSignalRegistration, historyLoader);
-        var agentCommand = new AgentCommand(promptExecutor, cancelSignalRegistration, executionCheckpointAppender, toolRuntime, agentAuditAppender);
-        var codeReviewCommand = new CodeReviewCommand();
-        var doctorCommand = new DoctorCommand(healthcheckExecutor);
-        var modelsCommand = new ModelsCommand(modelsExecutor);
-        var contextCommand = new ContextCommand();
-        var patchCommand = new PatchCommand();
-        var historyCommand = new HistoryCommand(historyLoader, historyClearer);
-        var resumeCommand = new ResumeCommand(executionCheckpointLoaderSafe);
-        var mcpCommand = new McpCommand(mcpServersLoader, mcpServersSaver, mcpServerTester);
-        var configCommand = new ConfigCommand(configLoaderSafe, configSaverSafe);
-        var skillsCommand = new SkillsCommand();
-        var skillCommand = new SkillCommand(promptExecutor, cancelSignalRegistration, executionCheckpointAppender);
-        var helpCommand = new HelpCommand();
-        var versionCommand = new VersionCommand();
+        var loggerFactory = serviceProvider?.GetService(typeof(ILoggerFactory)) as ILoggerFactory;
+
+        var askCommand = new AskCommand(promptExecutor, cancelSignalRegistration, executionCheckpointAppender,
+            loggerFactory?.CreateLogger<AskCommand>());
+        var chatCommand = new ChatCommand(promptExecutor, modelsExecutor, toolRuntime, cancelSignalRegistration, historyLoader,
+            loggerFactory?.CreateLogger<ChatCommand>());
+        var agentCommand = new AgentCommand(promptExecutor, cancelSignalRegistration, executionCheckpointAppender, toolRuntime, agentAuditAppender,
+            loggerFactory?.CreateLogger<AgentCommand>());
+        var codeReviewCommand = new CodeReviewCommand(loggerFactory?.CreateLogger<CodeReviewCommand>());
+        var doctorCommand = new DoctorCommand(healthcheckExecutor, loggerFactory?.CreateLogger<DoctorCommand>());
+        var modelsCommand = new ModelsCommand(modelsExecutor, loggerFactory?.CreateLogger<ModelsCommand>());
+        var contextCommand = new ContextCommand(loggerFactory?.CreateLogger<ContextCommand>());
+        var patchCommand = new PatchCommand(loggerFactory?.CreateLogger<PatchCommand>());
+        var historyCommand = new HistoryCommand(historyLoader, historyClearer, loggerFactory?.CreateLogger<HistoryCommand>());
+        var resumeCommand = new ResumeCommand(executionCheckpointLoaderSafe, loggerFactory?.CreateLogger<ResumeCommand>());
+        var mcpCommand = new McpCommand(mcpServersLoader, mcpServersSaver, mcpServerTester, loggerFactory?.CreateLogger<McpCommand>());
+        var configCommand = new ConfigCommand(configLoaderSafe, configSaverSafe, loggerFactory?.CreateLogger<ConfigCommand>());
+        var skillsCommand = new SkillsCommand(loggerFactory?.CreateLogger<SkillsCommand>());
+        var skillCommand = new SkillCommand(promptExecutor, cancelSignalRegistration, executionCheckpointAppender,
+            loggerFactory?.CreateLogger<SkillCommand>());
+        var helpCommand = new HelpCommand(loggerFactory?.CreateLogger<HelpCommand>());
+        var versionCommand = new VersionCommand(loggerFactory?.CreateLogger<VersionCommand>());
 
         return new CommandRegistry(
             askCommand,
@@ -196,6 +209,7 @@ internal sealed class CommandRegistry
             skillsCommand,
             skillCommand,
             helpCommand,
-            versionCommand);
+            versionCommand,
+            loggerFactory?.CreateLogger<CommandRegistry>());
     }
 }

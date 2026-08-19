@@ -1,6 +1,7 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Config;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -15,10 +16,14 @@ internal sealed class ResumeCommand : CommandBase
     public override string Description => "Retoma a ultima sessao interrompida de ask/agent/skill.";
 
     private readonly Func<IReadOnlyList<ExecutionSessionCheckpoint>> _executionCheckpointLoader;
+    private readonly ILogger<ResumeCommand> _logger;
 
-    public ResumeCommand(Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader)
+    public ResumeCommand(
+        Func<IReadOnlyList<ExecutionSessionCheckpoint>> executionCheckpointLoader,
+        ILogger<ResumeCommand>? logger = null)
     {
         _executionCheckpointLoader = executionCheckpointLoader;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ResumeCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -52,7 +57,9 @@ internal sealed class ResumeCommand : CommandBase
         var sessionId = GetStringParameter(parseResult.Parameters, "sessionId");
 
         ConsoleLogger.Info($"Resume command: {sessionId ?? "latest"}");
+        _logger.LogInformation("Resume command: {SessionId}", sessionId ?? "latest");
         ConsoleLogger.Info("Resume (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Resume (implementacao parcial - use Program.cs por enquanto)");
 
         return Task.FromResult((int)CliExitCode.Success);
     }

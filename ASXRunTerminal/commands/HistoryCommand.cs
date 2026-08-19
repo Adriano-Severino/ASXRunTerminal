@@ -1,6 +1,7 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Config;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -16,13 +17,16 @@ internal sealed class HistoryCommand : CommandBase
 
     private readonly Func<IReadOnlyList<PromptHistoryEntry>> _historyLoader;
     private readonly Action _historyClearer;
+    private readonly ILogger<HistoryCommand> _logger;
 
     public HistoryCommand(
         Func<IReadOnlyList<PromptHistoryEntry>> historyLoader,
-        Action historyClearer)
+        Action historyClearer,
+        ILogger<HistoryCommand>? logger = null)
     {
         _historyLoader = historyLoader;
         _historyClearer = historyClearer;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<HistoryCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -67,21 +71,26 @@ internal sealed class HistoryCommand : CommandBase
         if (shouldClear)
         {
             ConsoleLogger.Info("Limpando historico local...");
+            _logger.LogInformation("Limpando historico local...");
             _historyClearer();
             ConsoleLogger.Success("Historico local limpo.");
+            _logger.LogInformation("Historico local limpo.");
         }
         else
         {
             ConsoleLogger.Info("Listando historico local...");
+            _logger.LogInformation("Listando historico local...");
             var history = _historyLoader();
 
             if (history.Count == 0)
             {
                 ConsoleLogger.Warning("Nenhum historico encontrado.");
+                _logger.LogWarning("Nenhum historico encontrado.");
             }
             else
             {
                 ConsoleLogger.Success($"Encontrados {history.Count} entrada(s) no historico:");
+                _logger.LogInformation("Encontrados {Count} entrada(s) no historico", history.Count);
                 foreach (var entry in history)
                 {
                     Console.WriteLine($"  [{entry.TimestampUtc:yyyy-MM-dd HH:mm:ss}] {entry.Prompt}");

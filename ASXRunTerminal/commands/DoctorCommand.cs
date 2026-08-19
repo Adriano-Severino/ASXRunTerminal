@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -14,10 +15,14 @@ internal sealed class DoctorCommand : CommandBase
     public override string Description => "Valida a disponibilidade do Ollama.";
 
     private readonly Func<CancellationToken, Task<OllamaHealthcheckResult>> _healthcheckExecutor;
+    private readonly ILogger<DoctorCommand> _logger;
 
-    public DoctorCommand(Func<CancellationToken, Task<OllamaHealthcheckResult>> healthcheckExecutor)
+    public DoctorCommand(
+        Func<CancellationToken, Task<OllamaHealthcheckResult>> healthcheckExecutor,
+        ILogger<DoctorCommand>? logger = null)
     {
         _healthcheckExecutor = healthcheckExecutor;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<DoctorCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -45,16 +50,19 @@ internal sealed class DoctorCommand : CommandBase
         }
 
         ConsoleLogger.Info("Verificando saude do Ollama...");
+        _logger.LogInformation("Verificando saude do Ollama...");
         var healthcheckResult = await _healthcheckExecutor(cancellationToken);
 
         if (healthcheckResult.IsHealthy)
         {
             ConsoleLogger.Success($"Ollama esta saudavel (versao {healthcheckResult.Version}).");
+            _logger.LogInformation("Ollama esta saudavel (versao {Version})", healthcheckResult.Version);
             return (int)CliExitCode.Success;
         }
         else
         {
             ConsoleLogger.Error($"Ollama nao esta saudavel: {healthcheckResult.Error}");
+            _logger.LogError("Ollama nao esta saudavel: {Error}", healthcheckResult.Error);
             return (int)CliExitCode.RuntimeError;
         }
     }

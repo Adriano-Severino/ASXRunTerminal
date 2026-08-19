@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -9,6 +10,12 @@ namespace ASXRunTerminal.Commands;
 internal sealed class CodeReviewCommand : CommandBase
 {
     private const string CliName = "asxrun";
+    private readonly ILogger<CodeReviewCommand> _logger;
+
+    public CodeReviewCommand(ILogger<CodeReviewCommand>? logger = null)
+    {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<CodeReviewCommand>.Instance;
+    }
 
     public override string Name => "code-review";
     public override string Description => "Revisao de codigo com RAG para analise contextual.";
@@ -82,7 +89,10 @@ internal sealed class CodeReviewCommand : CommandBase
         var useRag = GetBoolParameter(parseResult.Parameters, "useRag", true);
 
         ConsoleLogger.Info($"Code review com RAG: {useRag}, Arquivos: {files.Length}, Severity: {severity ?? "default"}, Focus: {focus ?? "default"}");
+        _logger.LogInformation("Code review com RAG: {UseRag}, Arquivos: {FileCount}, Severity: {Severity}, Focus: {Focus}",
+            useRag, files.Length, severity ?? "default", focus ?? "default");
         ConsoleLogger.Info("Code review (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Code review (implementacao parcial - use Program.cs por enquanto)");
 
         // For now, delegate to the existing Program.cs ExecuteCodeReview method
         // This will be refactored further in subsequent steps

@@ -1,6 +1,7 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Config;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -16,13 +17,16 @@ internal sealed class ConfigCommand : CommandBase
 
     private readonly Func<UserRuntimeConfig> _configLoader;
     private readonly Action<UserRuntimeConfig> _configSaver;
+    private readonly ILogger<ConfigCommand> _logger;
 
     public ConfigCommand(
         Func<UserRuntimeConfig> configLoader,
-        Action<UserRuntimeConfig> configSaver)
+        Action<UserRuntimeConfig> configSaver,
+        ILogger<ConfigCommand>? logger = null)
     {
         _configLoader = configLoader;
         _configSaver = configSaver;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<ConfigCommand>.Instance;
     }
 
     public override CommandParseResult ParseArguments(string[] args)
@@ -60,7 +64,9 @@ internal sealed class ConfigCommand : CommandBase
         var arguments = parseResult.Parameters.TryGetValue("arguments", out var argsValue) && argsValue is string[] argArray ? argArray : Array.Empty<string>();
 
         ConsoleLogger.Info($"Config command: {action}, Arguments: {arguments.Length}");
+        _logger.LogInformation("Config command: {Action}, Arguments: {ArgumentCount}", action, arguments.Length);
         ConsoleLogger.Info("Config (implementacao parcial - use Program.cs por enquanto)");
+        _logger.LogInformation("Config (implementacao parcial - use Program.cs por enquanto)");
 
         // For now, delegate to the existing Program.cs config methods
         // This will be refactored further in subsequent steps

@@ -1,5 +1,6 @@
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Commands;
 
@@ -9,6 +10,12 @@ namespace ASXRunTerminal.Commands;
 internal sealed class VersionCommand : CommandBase
 {
     private const string CliName = "asxrun";
+    private readonly ILogger<VersionCommand> _logger;
+
+    public VersionCommand(ILogger<VersionCommand>? logger = null)
+    {
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<VersionCommand>.Instance;
+    }
 
     public override string Name => "version";
     public override string Description => "Exibe a versao do CLI.";
