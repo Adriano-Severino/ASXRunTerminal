@@ -2,6 +2,7 @@ using ASXRunTerminal.Config;
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using ASXRunTerminal.Subagents;
+using ASXRunTerminal.Commands;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using System;
@@ -19,7 +20,8 @@ namespace ASXRunTerminal;
 
 internal static partial class Program
 {
-    private static readonly IHost RagHost = RagService.Initialize();
+    private static readonly IHost RagHost = RagService.Initialize(Config.LoggingConfiguration.Default);
+    private static readonly IServiceProvider ServiceProvider = DependencyInjection.CreateServiceProvider(Config.LoggingConfiguration.Default);
 
     private const string CliName = "asxrun";
     private const string ModelFlag = "--model";
@@ -196,20 +198,42 @@ internal static partial class Program
 
     public static async Task<int> Main(string[] args)
     {
-        var result = Run(
-            args,
-            DefaultPromptExecutor,
-            DefaultHealthcheckExecutor,
-            DefaultModelsExecutor,
-            DefaultCancelSignalRegistration,
-            DefaultUserConfigInitializer,
-            applyConfiguredTheme: true,
-            workspacePatchAuditAppender: DefaultWorkspacePatchAuditAppender,
-            agentAuditAppender: DefaultAgentAuditAppender,
+        // Apply theme configuration before command execution
+        DefaultUserConfigInitializer();
+        ConsoleLogger.ConfigureTheme(UserRuntimeConfig.Default.Theme);
+        TryConfigureTerminalTheme(DefaultConfigLoader);
+
+        // Use the new command registry architecture
+        var commandRegistry = CommandRegistry.CreateDefault(
+            promptExecutor: DefaultPromptExecutor,
+            healthcheckExecutor: DefaultHealthcheckExecutor,
+            modelsExecutor: DefaultModelsExecutor,
+            cancelSignalRegistration: DefaultCancelSignalRegistration,
             executionCheckpointAppender: DefaultExecutionCheckpointAppender,
+            toolRuntime: CreateDefaultToolRuntime(),
+            agentAuditAppender: DefaultAgentAuditAppender,
+            historyLoader: DefaultHistoryLoader,
+            historyClearer: DefaultHistoryClearer,
+            mcpServersLoader: DefaultMcpServersLoader,
+            mcpServersSaver: DefaultMcpServersSaver,
+            mcpServerTester: DefaultMcpServerTester,
+            configLoader: DefaultConfigLoader,
+            configSaver: DefaultConfigSaver,
             executionCheckpointLoader: DefaultExecutionCheckpointLoader);
-        await RagHost.StopAsync();
-        return result;
+
+        try
+        {
+            var result = await commandRegistry.RouteAsync(args);
+            await RagHost.StopAsync();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            var friendlyError = CliFriendlyError.Runtime($"Ocorreu um erro interno: {ex.Message}");
+            WriteFriendlyError(friendlyError);
+            await RagHost.StopAsync();
+            return (int)friendlyError.ExitCode;
+        }
     }
 
     internal static async Task<int> RunForTests(string[] args)
@@ -6995,7 +7019,7 @@ internal static partial class Program
         return string.Join(", ", UserConfigFile.SupportedKeys);
     }
 
-    private static void WriteFriendlyError(CliFriendlyError error)
+    internal static void WriteFriendlyError(CliFriendlyError error)
     {
         ConsoleLogger.Error(error.BuildPrimaryMessage());
         ConsoleLogger.Error(error.BuildSuggestionMessage());

@@ -88,7 +88,7 @@ public sealed class SkillCatalogResolutionPrecedenceTests
 
         Assert.True(wasFound);
         Assert.Equal("Identifica proativamente bugs e edge cases que podem ter escapado no desenvolvimento.", skill.Description);
-        Assert.Contains("edge cases", skill.Instruction);
+        Assert.Contains("Edge cases", skill.Instruction);
         Assert.Contains("vulnerabilidades", skill.Instruction);
     }
 

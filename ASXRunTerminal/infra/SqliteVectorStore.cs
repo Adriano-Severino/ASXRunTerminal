@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Infra;
 
@@ -19,10 +20,12 @@ internal sealed class SqliteVectorStore : IDisposable
     private readonly SqliteConnection? _connection;
     private readonly bool _ownsConnection;
     private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly ILogger<SqliteVectorStore> _logger;
 
-    public SqliteVectorStore(VectorStoreConfiguration configuration)
+    public SqliteVectorStore(VectorStoreConfiguration configuration, ILogger<SqliteVectorStore>? logger = null)
     {
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SqliteVectorStore>.Instance;
 
         if (string.IsNullOrEmpty(_configuration.DatabasePath))
         {
@@ -36,6 +39,8 @@ internal sealed class SqliteVectorStore : IDisposable
             _ownsConnection = true;
         }
 
+        _logger.LogDebug("Initializing vector store at {DatabasePath}", 
+            string.IsNullOrEmpty(_configuration.DatabasePath) ? ":memory:" : _configuration.DatabasePath);
         InitializeDatabase();
     }
 

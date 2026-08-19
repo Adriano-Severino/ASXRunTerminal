@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using ASXRunTerminal.Core;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Infra;
 
@@ -23,6 +24,7 @@ internal sealed class McpRemoteClient : IMcpClient
     private readonly CancellationTokenSource _disposeTokenSource = new();
     private readonly TaskCompletionSource<Uri> _messageEndpointSource =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly ILogger<McpRemoteClient> _logger;
 
     private long _requestIdCounter;
     private Uri? _resolvedMessageEndpoint;
@@ -35,12 +37,14 @@ internal sealed class McpRemoteClient : IMcpClient
     public McpRemoteClient(
         McpServerRemoteOptions serverOptions,
         HttpClient? httpClient = null,
-        TimeSpan? defaultRequestTimeout = null)
+        TimeSpan? defaultRequestTimeout = null,
+        ILogger<McpRemoteClient>? logger = null)
     {
         _serverOptions = serverOptions ?? throw new ArgumentNullException(nameof(serverOptions));
         _httpClient = httpClient ?? new HttpClient();
         _disposeHttpClient = httpClient is null;
         _defaultRequestTimeout = defaultRequestTimeout ?? DefaultRequestTimeout;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<McpRemoteClient>.Instance;
 
         if (_defaultRequestTimeout <= TimeSpan.Zero && _defaultRequestTimeout != Timeout.InfiniteTimeSpan)
         {
@@ -72,6 +76,8 @@ internal sealed class McpRemoteClient : IMcpClient
     {
         ThrowIfDisposed();
 
+        _logger.LogDebug("Attempting to connect to MCP server at {Endpoint}", _serverOptions.Endpoint);
+
         await _connectionLock.WaitAsync(cancellationToken);
         try
         {
@@ -80,16 +86,19 @@ internal sealed class McpRemoteClient : IMcpClient
 
             if (_isConnected)
             {
+                _logger.LogDebug("MCP client already connected");
                 return;
             }
 
             if (_serverOptions.TransportKind == McpRemoteTransportKind.Http)
             {
                 _isConnected = true;
+                _logger.LogInformation("MCP client connected via HTTP transport");
                 return;
             }
 
             await ConnectSseAsync(cancellationToken);
+            _logger.LogInformation("MCP client connected via SSE transport");
         }
         finally
         {

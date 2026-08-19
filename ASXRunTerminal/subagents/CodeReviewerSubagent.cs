@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using ASXRunTerminal.Core;
 using ASXRunTerminal.Infra;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Subagents;
 
@@ -23,6 +24,7 @@ internal sealed class CodeReviewerSubagent : ICodeReviewerSubagent
     private readonly IChatClient _chatClient;
     private readonly VectorStoreConfiguration _configuration;
     private readonly IOllamaHttpClient _ollamaHttpClient;
+    private readonly ILogger<CodeReviewerSubagent> _logger;
 
     private static readonly string[] ProjectSpecificRules = new[]
     {
@@ -40,13 +42,15 @@ internal sealed class CodeReviewerSubagent : ICodeReviewerSubagent
         SqliteVectorStore vectorStore,
         IChatClient chatClient,
         VectorStoreConfiguration configuration,
-        IOllamaHttpClient ollamaHttpClient)
+        IOllamaHttpClient ollamaHttpClient,
+        ILogger<CodeReviewerSubagent>? logger = null)
     {
         _embeddingGenerator = embeddingGenerator ?? throw new ArgumentNullException(nameof(embeddingGenerator));
         _vectorStore = vectorStore ?? throw new ArgumentNullException(nameof(vectorStore));
         _chatClient = chatClient ?? throw new ArgumentNullException(nameof(chatClient));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _ollamaHttpClient = ollamaHttpClient ?? throw new ArgumentNullException(nameof(ollamaHttpClient));
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<CodeReviewerSubagent>.Instance;
     }
 
     public async Task<CodeReviewResult> ReviewCodeAsync(
@@ -54,6 +58,9 @@ internal sealed class CodeReviewerSubagent : ICodeReviewerSubagent
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+
+        _logger.LogInformation("Starting code review for {FileCount} files with RAG: {UseRag}", 
+            context.FilePaths.Count, context.UseRag);
 
         var stopwatch = Stopwatch.StartNew();
         var result = new CodeReviewResult();
@@ -64,6 +71,7 @@ internal sealed class CodeReviewerSubagent : ICodeReviewerSubagent
             RagContextInfo? ragInfo = null;
             if (context.UseRag && context.FilePaths.Count > 0)
             {
+                _logger.LogDebug("Starting RAG indexing for {FileCount} files", context.FilePaths.Count);
                 var ragStopwatch = Stopwatch.StartNew();
                 await IndexCodeFilesAsync(context.FilePaths, context.FileContents, forceReindex: false, cancellationToken)
                     .ConfigureAwait(false);
@@ -73,18 +81,23 @@ internal sealed class CodeReviewerSubagent : ICodeReviewerSubagent
                 {
                     RagDurationMs = ragStopwatch.ElapsedMilliseconds
                 };
+
+                _logger.LogDebug("RAG indexing completed in {DurationMs}ms", ragInfo.RagDurationMs);
             }
 
             // Step 2: Read file contents
+            _logger.LogDebug("Reading file contents for review");
             var fileContents = await ReadFileContentsAsync(context, cancellationToken)
                 .ConfigureAwait(false);
 
             // Step 3: Build review prompt with RAG context if enabled
+            _logger.LogDebug("Building review prompt with context");
             var reviewPrompt = await BuildReviewPromptAsync(context, fileContents, ragInfo, cancellationToken)
                 .ConfigureAwait(false);
 
             // Step 4: Execute review
             var model = context.Model ?? OllamaModelDefaults.DefaultModel;
+            _logger.LogDebug("Executing code review with model: {Model}", model);
             var reviewResponse = await _ollamaHttpClient
                 .GenerateAsync(reviewPrompt, model, cancellationToken)
                 .ConfigureAwait(false);
@@ -97,6 +110,10 @@ internal sealed class CodeReviewerSubagent : ICodeReviewerSubagent
             {
                 result.RagContext = ragInfo;
             }
+
+            stopwatch.Stop();
+            _logger.LogInformation("Code review completed in {DurationMs}ms with {IssueCount} issues found", 
+                stopwatch.ElapsedMilliseconds, result.Issues.Count);
 
             result.Status = CodeReviewStatus.Completed;
         }

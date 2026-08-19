@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ASXRunTerminal.Core;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Infra;
 
@@ -27,13 +28,15 @@ internal sealed class OllamaHttpClient : IOllamaHttpClient
     private readonly Func<string, string?>? _environmentVariableReader;
     private readonly TimeSpan _retryDelay;
     private readonly Lazy<IChatClient> _chatClient;
+    private readonly ILogger<OllamaHttpClient> _logger;
 
     public OllamaHttpClient(
         HttpClient httpClient,
         string? defaultModel = null,
         Func<string, string?>? environmentVariableReader = null,
         Uri? baseAddress = null,
-        TimeSpan? retryDelay = null)
+        TimeSpan? retryDelay = null,
+        ILogger<OllamaHttpClient>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
 
@@ -43,6 +46,7 @@ internal sealed class OllamaHttpClient : IOllamaHttpClient
         _retryDelay = retryDelay ?? TimeSpan.FromMilliseconds(200);
         BaseAddress = baseAddress ?? OllamaModelDefaults.DefaultEndpoint;
         _chatClient = new Lazy<IChatClient>(CreateChatClientAdapter);
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<OllamaHttpClient>.Instance;
     }
 
     public Uri BaseAddress { get; }
@@ -64,6 +68,8 @@ internal sealed class OllamaHttpClient : IOllamaHttpClient
         ValidatePrompt(prompt);
 
         var resolvedModel = ResolveModel(model);
+        _logger.LogDebug("Starting Ollama generate request with model: {Model}", resolvedModel);
+
         var payload = new GenerateRequest(resolvedModel, prompt, Stream: false);
         var aggregatedContent = new System.Text.StringBuilder();
         var anyChunkParsed = false;
@@ -81,6 +87,7 @@ internal sealed class OllamaHttpClient : IOllamaHttpClient
 
             if (!response.IsSuccessStatusCode)
             {
+                _logger.LogError("Ollama returned HTTP status {StatusCode} for generate request", (int)response.StatusCode);
                 throw new InvalidOperationException(
                     $"O Ollama retornou status HTTP {(int)response.StatusCode} ao gerar a resposta.");
             }

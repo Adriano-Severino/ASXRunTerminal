@@ -175,7 +175,7 @@ public class CodeReviewDataStructuresTests
     public void CodeReviewSeverity_ShouldHaveExpectedValues()
     {
         // Assert
-        var values = Enum.GetValues(typeof(CodeReviewSeverity));
+        var values = Enum.GetValues<CodeReviewSeverity>();
         Assert.Equal(5, values.Length);
         Assert.Contains(CodeReviewSeverity.Critical, values);
         Assert.Contains(CodeReviewSeverity.High, values);
@@ -188,7 +188,7 @@ public class CodeReviewDataStructuresTests
     public void CodeReviewFocus_ShouldHaveExpectedValues()
     {
         // Assert
-        var values = Enum.GetValues(typeof(CodeReviewFocus));
+        var values = Enum.GetValues<CodeReviewFocus>();
         Assert.Equal(6, values.Length);
         Assert.Contains(CodeReviewFocus.Comprehensive, values);
         Assert.Contains(CodeReviewFocus.Security, values);

@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using ASXRunTerminal.Core;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 namespace ASXRunTerminal.Infra;
 
@@ -34,17 +35,20 @@ internal sealed class OllamaEmbeddingGenerator : IEmbeddingGenerator<string, Emb
     private readonly HttpClient _httpClient;
     private readonly string? _defaultModel;
     private readonly Uri _baseAddress;
+    private readonly ILogger<OllamaEmbeddingGenerator> _logger;
 
     public OllamaEmbeddingGenerator(
         HttpClient httpClient,
         string? defaultModel = null,
-        Uri? baseAddress = null)
+        Uri? baseAddress = null,
+        ILogger<OllamaEmbeddingGenerator>? logger = null)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
 
         _httpClient = httpClient;
         _defaultModel = defaultModel ?? "nomic-embed-text";
         _baseAddress = baseAddress ?? OllamaModelDefaults.DefaultEndpoint;
+        _logger = logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<OllamaEmbeddingGenerator>.Instance;
     }
 
     public EmbeddingGeneratorMetadata Metadata => DefaultMetadata;

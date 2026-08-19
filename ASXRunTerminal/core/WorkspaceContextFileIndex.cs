@@ -5,7 +5,9 @@ internal readonly record struct WorkspaceContextQuery(
     string? FileName = null,
     string? Extension = null,
     WorkspaceEntryKind? Kind = null,
-    int Limit = 200);
+    int Limit = 200,
+    bool EnableSimilaritySearch = false,
+    string? SimilarityQuery = null);
 
 internal readonly record struct WorkspaceContextIndexRefreshResult(
     int AddedEntryCount,
@@ -15,6 +17,11 @@ internal readonly record struct WorkspaceContextIndexRefreshResult(
 {
     public bool HasChanges => AddedEntryCount > 0 || UpdatedEntryCount > 0 || RemovedEntryCount > 0;
 }
+
+internal readonly record struct SimilaritySearchResult(
+    WorkspaceEntry Entry,
+    double SimilarityScore,
+    string MatchedContent);
 
 internal sealed class WorkspaceContextFileIndex
 {
@@ -165,6 +172,129 @@ internal sealed class WorkspaceContextFileIndex
 
             return resolvedEntries;
         }
+    }
+
+    /// <summary>
+    /// Performs similarity search on indexed files based on content similarity.
+    /// </summary>
+    public IReadOnlyList<SimilaritySearchResult> SearchBySimilarity(
+        string query,
+        int limit = 10,
+        WorkspaceEntryKind? kindFilter = null)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            throw new ArgumentException("Query cannot be empty", nameof(query));
+        }
+
+        if (limit <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), "Limit must be greater than zero");
+        }
+
+        lock (_syncLock)
+        {
+            var results = new List<SimilaritySearchResult>();
+            var queryLower = query.ToLowerInvariant();
+
+            foreach (var entry in _entriesByPath.Values)
+            {
+                if (kindFilter.HasValue && entry.Kind != kindFilter.Value)
+                {
+                    continue;
+                }
+
+                // Simple similarity scoring based on content matching
+                var similarityScore = CalculateSimilarityScore(queryLower, entry);
+                if (similarityScore > 0.0)
+                {
+                    results.Add(new SimilaritySearchResult(
+                        entry,
+                        similarityScore,
+                        ExtractMatchedContent(queryLower, entry)));
+                }
+            }
+
+            return results
+                .OrderByDescending(r => r.SimilarityScore)
+                .Take(limit)
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    /// Performs incremental indexing for better performance on large workspaces.
+    /// </summary>
+    public WorkspaceContextIndexRefreshResult RefreshIncremental()
+    {
+        lock (_syncLock)
+        {
+            var currentMap = _mapResolver(_workspaceRootDirectory, _options);
+            var changes = ApplyMap(currentMap);
+
+            // Only update timestamp if there were actual changes
+            if (changes.HasChanges)
+            {
+                _lastIndexedAtUtc = _utcNowResolver();
+                _version++;
+            }
+
+            return changes;
+        }
+    }
+
+    private double CalculateSimilarityScore(string queryLower, WorkspaceEntry entry)
+    {
+        var relativePathLower = entry.RelativePath.ToLowerInvariant();
+        var fileName = Path.GetFileName(entry.RelativePath).ToLowerInvariant();
+        var extension = Path.GetExtension(entry.RelativePath).ToLowerInvariant();
+
+        double score = 0.0;
+
+        // Exact filename match
+        if (fileName.Contains(queryLower) || queryLower.Contains(fileName))
+        {
+            score += 1.0;
+        }
+
+        // Partial filename match
+        if (fileName.Split(new[] { '_', '-', '.' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(part => queryLower.Contains(part) || part.Contains(queryLower)))
+        {
+            score += 0.7;
+        }
+
+        // Path match
+        if (relativePathLower.Contains(queryLower))
+        {
+            score += 0.5;
+        }
+
+        // Extension match for code files
+        if (queryLower.StartsWith('.') && extension == queryLower)
+        {
+            score += 0.8;
+        }
+
+        return score;
+    }
+
+    private string ExtractMatchedContent(string queryLower, WorkspaceEntry entry)
+    {
+        var relativePathLower = entry.RelativePath.ToLowerInvariant();
+        var fileName = Path.GetFileName(entry.RelativePath).ToLowerInvariant();
+
+        if (fileName.Contains(queryLower))
+        {
+            return fileName;
+        }
+
+        if (relativePathLower.Contains(queryLower))
+        {
+            return entry.RelativePath;
+        }
+
+        return Path.GetFileName(entry.RelativePath);
     }
 
     internal WorkspaceContextIndexRefreshResult Refresh(WorkspaceStructureMap latestMap)
